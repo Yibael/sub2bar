@@ -2,6 +2,23 @@ import AppKit
 import SwiftUI
 import Sub2BarCore
 
+enum ConnectionState: String {
+    case notConfigured = "待配置"
+    case disconnected = "未连接"
+    case connecting = "连接中"
+    case connected = "已连接"
+    case failed = "连接异常"
+
+    var symbol: String {
+        switch self {
+        case .notConfigured, .disconnected: return "circle"
+        case .connecting: return "circle.dotted"
+        case .connected: return "checkmark.circle"
+        case .failed: return "exclamationmark.circle"
+        }
+    }
+}
+
 @MainActor
 final class AppStore: ObservableObject {
     typealias ClientFactory = (Configuration, String) -> APIClient
@@ -23,11 +40,10 @@ final class AppStore: ObservableObject {
     @Published private(set) var isSaving = false
     @Published private(set) var isPanelVisible = false
     @Published private(set) var isRefreshing = false
-    @Published private(set) var isRefreshingQuota = false
-    @Published private(set) var isRefreshingUpstream = false
+    @Published private(set) var isRefreshingQuota = false { didSet { updateQuotaLoading() } }
+    @Published private(set) var showsQuotaLoading = false
     @Published private(set) var nextRefreshAt: Date?
     @Published private(set) var nextRuntimeAt: Date?
-    @Published private(set) var nextStatusAt: Date?
     @Published private var credentialRevision = 0
     @Published var search = ""
     @Published var platform = "全部"
@@ -38,10 +54,11 @@ final class AppStore: ObservableObject {
     private let automaticallySchedule: Bool
     private var pinSelection: PinnedAccountSelection
     private var latestAccounts: [Int: Account] = [:]
-    private var lastHighCostAttempt: [String: Date] = [:]
+    private var batchUsageSupported = true
     private var runtimeTask: Task<Void, Never>?
     private var quotaTask: Task<Void, Never>?
-    private var upstreamTask: Task<Void, Never>?
+    private var quotaLoadingTask: Task<Void, Never>?
+    private var quotaLoadingStartedAt: ContinuousClock.Instant?
     private var accountsTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var credentialTask: Task<Void, Never>?
@@ -51,7 +68,18 @@ final class AppStore: ObservableObject {
     private var isSuspended = false
     private var requiresReopen = false
     private var runtimeFailures = 0
-    private var quotaFailures = 0
+    private struct QuotaKey: Hashable {
+        let server: String
+        let accountID: Int
+    }
+    private struct QuotaTiming {
+        let completedAt: Date
+        let failures: Int
+        let retryNotBefore: Date?
+    }
+    // Session-local eligibility survives panel, settings and Pin changes.
+    // It contains no credentials or account payloads.
+    private var quotaTimings: [QuotaKey: QuotaTiming] = [:]
     private let defaultsKey = "sub2bar.configuration.v1"
     private let pinsKey = "sub2bar.pins.v1"
 
@@ -67,12 +95,27 @@ final class AppStore: ObservableObject {
     var isConfigured: Bool { !configuration.serverURL.isEmpty }
     var hostLabel: String { (try? configuration.baseURL().host) ?? "未配置服务器" }
     var pinCount: Int { pinnedIDs.count }
+    var showsAccountFilters: Bool { pinCount > 5 }
     var needsCredentialAccess: Bool { isConfigured && cachedKey() == nil }
     var isPolling: Bool { pollTask != nil }
+    /// Header feedback belongs to quota work, not the frequent runtime polls.
+    var isRefreshingUsage: Bool { isRefreshingQuota }
+    var connectionState: ConnectionState {
+        guard isConfigured else { return .notConfigured }
+        if errorMessage != nil { return .failed }
+        if isPanelVisible && isLoadingCredential { return .connecting }
+        guard !needsCredentialAccess else { return .notConfigured }
+        guard canPoll else { return .disconnected }
+        // Keep the last successful connection state during ordinary polling.
+        // An upstream quota failure is not a failed connection to sub2api.
+        if lastUpdated != nil { return .connected }
+        return isRefreshing ? .connecting : .disconnected
+    }
     var canPoll: Bool { isPanelVisible && !isSuspended && !requiresReopen && !isSaving && isConfigured && !needsCredentialAccess && !pinnedIDs.isEmpty }
     var platforms: [String] { ["全部"] + Set(snapshots.map(\.account.platformLabel)).sorted() }
     var filtered: [AccountSnapshot] {
-        snapshots.filter { (platform == "全部" || $0.account.platformLabel == platform) &&
+        guard showsAccountFilters else { return snapshots }
+        return snapshots.filter { (platform == "全部" || $0.account.platformLabel == platform) &&
             (search.isEmpty || $0.account.name.localizedCaseInsensitiveContains(search) || $0.account.platformLabel.localizedCaseInsensitiveContains(search)) }
     }
     var activeCount: Int { snapshots.filter { $0.account.isAvailable && pinnedAccountErrors[$0.id] == nil }.count }
@@ -115,12 +158,27 @@ final class AppStore: ObservableObject {
     func save(_ draft: Configuration, key: String) async throws {
         guard !isSaving, !isLoadingCredential else { throw CredentialSessionError.busy }
         let base = try draft.baseURL()
+        let sameConnection = (try? configuration.baseURL().absoluteString) == base.absoluteString &&
+            cachedKey() == key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let wasPolling = canPoll
         isSaving = true
-        defer { isSaving = false; credentialRevision += 1 }
+        defer { isSaving = false; credentialRevision += 1; updateQuotaDeadline(); scheduleWake() }
         var saved = draft
         saved.serverURL = base.absoluteString; saved.refreshInterval = draft.effectiveRefreshInterval
+        saved.accountRefreshInterval = draft.effectiveAccountRefreshInterval
         let data = try JSONEncoder().encode(saved)
         try await credentials.save(key, for: base.absoluteString)
+        if sameConnection {
+            guard saved != configuration else { return }
+            // Timing-only changes keep snapshots, full statistics, pins and the
+            // account directory. Save never dispatches a connection request.
+            cancelPolling()
+            configuration = saved; defaults.set(data, forKey: defaultsKey)
+            if wasPolling {
+                nextRuntimeAt = now().addingTimeInterval(runtimeDelay)
+            }
+            return
+        }
         resetAllRequests()
         configuration = saved; defaults.set(data, forKey: defaultsKey)
         credentialAttemptedServer = base.absoluteString; credentialError = nil
@@ -129,11 +187,13 @@ final class AppStore: ObservableObject {
         availableAccounts = []; hasLoadedAccounts = false; accountsError = nil; accountsUpdatedAt = nil
         lastUpdated = nil; quotaUpdatedAt = nil; statusUpdatedAt = nil; errorMessage = nil
         platform = "全部"; search = ""
+        batchUsageSupported = true; runtimeFailures = 0
         // Saving does not connect or query; only a subsequent panel opening does.
         requiresReopen = true
     }
     private func restorePins() {
         pinnedIDs = (try? configuration.baseURL().absoluteString).map { pinSelection.ids(for: $0) } ?? []
+        if !showsAccountFilters { search = ""; platform = "全部" }
     }
     func isPinned(_ id: Int) -> Bool { pinnedIDs.contains(id) }
     func setPinned(_ pinned: Bool, id: Int) {
@@ -186,21 +246,37 @@ final class AppStore: ObservableObject {
     func refresh() {
         guard canPoll else { return }
         let date = now()
-        if !isRefreshing { nextRuntimeAt = date; nextStatusAt = date }
-        if !isRefreshingQuota { nextRefreshAt = date }
+        if !isRefreshing { nextRuntimeAt = date }
         runDueRefreshes()
     }
-    /// Coalesce coincident runtime/status deadlines; high-cost calls run separately.
+    /// Two independent request lanes: account state and quota/statistics.
     func runDueRefreshes() {
         guard canPoll else { return }
         let date = now()
+        updateQuotaDeadline()
         let runtimeDue = nextRuntimeAt.map { $0 <= date } ?? true
-        let statusDue = nextStatusAt.map { $0 <= date } ?? true
-        if !isRefreshing && (runtimeDue || statusDue) { refreshRuntime(updateStatus: statusDue) }
-        if !isRefreshingQuota && (nextRefreshAt.map { $0 <= date } ?? true), !latestAccounts.isEmpty { refreshCachedQuota() }
+        if !isRefreshing && runtimeDue { refreshRuntime() }
+        if quotaTask == nil, let nextRefreshAt, nextRefreshAt <= date { refreshQuota() }
         scheduleWake()
     }
-    private func refreshRuntime(updateStatus: Bool) {
+    private var runtimeDelay: Double {
+        min(120, configuration.effectiveAccountRefreshInterval * pow(2, Double(runtimeFailures)))
+    }
+    private func quotaDeadline(server: String, id: Int) -> Date {
+        guard let timing = quotaTimings[QuotaKey(server: server, accountID: id)] else { return .distantPast }
+        let delay = min(600, configuration.effectiveRefreshInterval * pow(2, Double(timing.failures)))
+        let deadline = timing.completedAt.addingTimeInterval(delay)
+        return max(deadline, timing.retryNotBefore ?? deadline)
+    }
+    private func updateQuotaDeadline() {
+        guard canPoll, let server = try? configuration.baseURL().absoluteString else {
+            nextRefreshAt = nil
+            return
+        }
+        nextRefreshAt = pinnedIDs.filter { latestAccounts[$0] != nil }
+            .map { quotaDeadline(server: server, id: $0) }.min()
+    }
+    private func refreshRuntime() {
         guard canPoll, !isRefreshing else { return }
         isRefreshing = true
         let token = generation; let config = configuration; let ids = pinnedIDs
@@ -208,9 +284,7 @@ final class AppStore: ObservableObject {
             defer {
                 if generation == token {
                     isRefreshing = false; runtimeTask = nil
-                    let interval = min(60, Configuration.concurrencyInterval * pow(2, Double(runtimeFailures)))
-                    nextRuntimeAt = now().addingTimeInterval(interval)
-                    if updateStatus { nextStatusAt = now().addingTimeInterval(max(Configuration.statusInterval, interval)) }
+                    nextRuntimeAt = now().addingTimeInterval(runtimeDelay)
                     runDueRefreshes()
                 }
             }
@@ -222,16 +296,14 @@ final class AppStore: ObservableObject {
                 for item in result.snapshots {
                     let old = snapshots.first { $0.id == item.id }
                     latestAccounts[item.id] = item.account
-                    let account = updateStatus ? item.account : (old?.account.withRuntime(from: item.account) ?? item.account)
-                    replace(AccountSnapshot(account: account, usage: old?.usage, usageError: old?.usageError,
+                    replace(AccountSnapshot(account: item.account, usage: old?.usage, usageError: old?.usageError,
                                             statisticsUsage: old?.statisticsUsage, statisticsUpdatedAt: old?.statisticsUpdatedAt))
                 }
                 for id in result.accountErrors.keys { latestAccounts[id] = nil }
                 if result.snapshots.isEmpty && !result.accountErrors.isEmpty { errorMessage = "账号读取失败，显示上次结果。" }
                 else { lastUpdated = now(); errorMessage = nil }
-                if updateStatus { statusUpdatedAt = now() }
+                statusUpdatedAt = now()
                 if !platforms.contains(platform) { platform = "全部" }
-                refreshHighCostIfDue()
             } catch {
                 guard generation == token, !Task.isCancelled else { return }
                 runtimeFailures = min(runtimeFailures + 1, 5); errorMessage = error.localizedDescription
@@ -239,86 +311,86 @@ final class AppStore: ObservableObject {
             }
         }
     }
-    private func refreshCachedQuota() {
-        guard canPoll, !isRefreshingQuota else { return }
-        isRefreshingQuota = true
+    private func refreshQuota() {
+        guard canPoll, quotaTask == nil,
+              let server = try? configuration.baseURL().absoluteString else { return }
         let token = generation; let config = configuration
-        let accounts = pinnedIDs.compactMap { latestAccounts[$0] }
-        // Fast OpenAI path reads account.extra, never /usage?source=active.
-        for account in accounts where account.platform == "openai" {
-            guard let old = snapshots.first(where: { $0.id == account.id }) else { continue }
-            let cached = account.extra?.usage(at: now())
-            let hasCache = cached?.fiveHour != nil || cached?.sevenDay != nil
-            replace(AccountSnapshot(account: old.account, usage: hasCache ? cached : old.usage,
-                                    usageError: old.usageError, statisticsUsage: old.statisticsUsage,
-                                    statisticsUpdatedAt: old.statisticsUpdatedAt))
-        }
-        let passive = accounts.filter(\.supportsPassiveUsage)
-        quotaTask = Task { [self] in
-            defer {
-                if generation == token {
-                    isRefreshingQuota = false; quotaTask = nil; quotaUpdatedAt = now()
-                    let delay = min(60, configuration.effectiveRefreshInterval * pow(2, Double(quotaFailures)))
-                    nextRefreshAt = now().addingTimeInterval(delay); scheduleWake()
-                }
-            }
-            do {
-                let results = try await loadUsage(accounts: passive, api: client(for: config), passive: true)
-                guard generation == token, !Task.isCancelled, canPoll else { return }
-                quotaFailures = results.contains { $0.error != nil } ? min(quotaFailures + 1, 4) : 0
-                applyUsage(results, highCost: false)
-            } catch {
-                guard generation == token, !Task.isCancelled else { return }
-                quotaFailures = min(quotaFailures + 1, 4); handleAuthenticationFailure(error)
-            }
-        }
-    }
-    /// Reserve BEFORE dispatch. Closing, cancelling, saving, unpin/re-pin and
-    /// manual refresh never reset the per-server/account ten-minute budget.
-    private func refreshHighCostIfDue() {
-        guard canPoll, !isRefreshingUpstream else { return }
-        let config = configuration
-        guard let server = try? config.baseURL().absoluteString else { return }
         let date = now()
-        let accounts = pinnedIDs.compactMap { latestAccounts[$0] }.filter { account in
-            guard !account.supportsPassiveUsage else { return false }
-            guard let last = lastHighCostAttempt["\(server)|\(account.id)"] else { return true }
-            return date.timeIntervalSince(last) >= Configuration.upstreamMinimumInterval
-        }
+        let accounts = pinnedIDs.filter { quotaDeadline(server: server, id: $0) <= date }
+            .compactMap { latestAccounts[$0] }
         guard !accounts.isEmpty else { return }
-        for account in accounts { lastHighCostAttempt["\(server)|\(account.id)"] = date }
-        isRefreshingUpstream = true
-        let token = generation
-        upstreamTask = Task { [self] in
-            defer { if generation == token { isRefreshingUpstream = false; upstreamTask = nil } }
+        isRefreshingQuota = true
+        quotaTask = Task { [self] in
+            var attempted = false
+            var failures: [Int: Bool] = [:]
+            defer {
+                // Cancellation also completes an attempt: the server may have
+                // received it already. Record even when UI generation changed.
+                if attempted {
+                    let completedAt = now()
+                    for account in accounts {
+                        let key = QuotaKey(server: server, accountID: account.id)
+                        let previous = quotaTimings[key]
+                        let count = failures[account.id].map { $0 ? min((previous?.failures ?? 0) + 1, 4) : 0 }
+                            ?? previous?.failures ?? 0
+                        let retry = count == 0 ? nil : completedAt.addingTimeInterval(
+                            min(600, config.effectiveRefreshInterval * pow(2, Double(count))))
+                        quotaTimings[key] = QuotaTiming(completedAt: completedAt, failures: count,
+                                                       retryNotBefore: retry)
+                    }
+                }
+                quotaTask = nil
+                if generation == token {
+                    isRefreshingQuota = false
+                }
+                updateQuotaDeadline(); scheduleWake()
+            }
             do {
-                let results = try await loadUsage(accounts: accounts, api: client(for: config), passive: false)
+                try Task.checkCancellation()
+                let api = try client(for: config)
+                attempted = true
+                let results: [AccountUsageResult]
+                if batchUsageSupported {
+                    do {
+                        results = try await api.loadUsageBatch(ids: accounts.map(\.id))
+                    } catch let error as APIError where error == .http(404) || error == .http(405) {
+                        guard generation == token, !Task.isCancelled, canPoll else { return }
+                        batchUsageSupported = false
+                        results = try await loadIndividualUsage(accounts: accounts, api: api)
+                    }
+                } else {
+                    results = try await loadIndividualUsage(accounts: accounts, api: api)
+                }
                 guard generation == token, !Task.isCancelled, canPoll else { return }
-                applyUsage(results, highCost: true)
+                for result in results { failures[result.id] = result.error != nil }
+                applyUsage(results)
+                if results.contains(where: { $0.usage != nil }) { quotaUpdatedAt = now() }
             } catch {
                 guard generation == token, !Task.isCancelled else { return }
+                for account in accounts { failures[account.id] = true }
+                applyUsage(accounts.map { AccountUsageResult(id: $0.id, usage: nil, error: "额度读取失败") })
                 handleAuthenticationFailure(error)
             }
         }
     }
-    private struct UsageResult: Sendable { let id: Int; let usage: UsageInfo?; let error: String? }
-    private func loadUsage(accounts: [Account], api: APIClient, passive: Bool) async throws -> [UsageResult] {
-        try await withThrowingTaskGroup(of: UsageResult.self) { group in
+    private func loadIndividualUsage(accounts: [Account], api: APIClient) async throws -> [AccountUsageResult] {
+        try await withThrowingTaskGroup(of: AccountUsageResult.self) { group in
             var iterator = accounts.makeIterator()
             func enqueue(_ account: Account) {
                 group.addTask {
                     do {
-                        let usage = try await api.loadUsage(for: account, passive: passive)
-                        return UsageResult(id: account.id, usage: usage, error: usage.hasError ? "上游额度暂不可用" : nil)
+                        let usage = try await api.loadUsage(for: account, passive: account.supportsPassiveUsage)
+                        return AccountUsageResult(id: account.id, usage: usage.hasError ? nil : usage,
+                                                  error: usage.hasError ? "额度读取失败" : nil)
                     } catch is CancellationError { throw CancellationError() }
                     catch {
                         if let e = error as? APIError, e == .http(401) || e == .http(403) { throw e }
-                        return UsageResult(id: account.id, usage: nil, error: error.localizedDescription)
+                        return AccountUsageResult(id: account.id, usage: nil, error: "额度读取失败")
                     }
                 }
             }
             for _ in 0..<4 { if let account = iterator.next() { enqueue(account) } }
-            var results: [UsageResult] = []
+            var results: [AccountUsageResult] = []
             for try await result in group {
                 try Task.checkCancellation(); results.append(result)
                 if let next = iterator.next() { enqueue(next) }
@@ -326,15 +398,12 @@ final class AppStore: ObservableObject {
             return results
         }
     }
-    private func applyUsage(_ results: [UsageResult], highCost: Bool) {
+    private func applyUsage(_ results: [AccountUsageResult]) {
         for result in results {
             guard let old = snapshots.first(where: { $0.id == result.id }) else { continue }
-            var display = result.usage ?? old.usage
-            if highCost, let sampled = latestAccounts[result.id]?.extra?.sampledAt,
-               let returned = result.usage?.updatedAt.flatMap(parseAPIDate), sampled > returned {
-                display = latestAccounts[result.id]?.extra?.usage(at: now())
-            }
-            replace(AccountSnapshot(account: old.account, usage: display, usageError: result.error,
+            // Percentage, reset time and cost always come from one response.
+            // Failures retain the last complete response instead of blanking it.
+            replace(AccountSnapshot(account: old.account, usage: result.usage ?? old.usage, usageError: result.error,
                                     statisticsUsage: result.usage ?? old.statisticsUsage,
                                     statisticsUpdatedAt: result.usage == nil ? old.statisticsUpdatedAt : now()))
         }
@@ -348,12 +417,36 @@ final class AppStore: ObservableObject {
         guard canPoll, !isRefreshingQuota, let nextRefreshAt else { return nil }
         return max(0, Int(ceil(nextRefreshAt.timeIntervalSince(date))))
     }
+    /// Keep fast quota cycles visible without delaying requests or changing
+    /// polling deadlines. A new cycle cancels the previous visual hide task.
+    private func updateQuotaLoading() {
+        quotaLoadingTask?.cancel(); quotaLoadingTask = nil
+        if isRefreshingUsage {
+            if !showsQuotaLoading {
+                quotaLoadingStartedAt = .now
+                showsQuotaLoading = true
+            }
+            return
+        }
+        guard showsQuotaLoading, let started = quotaLoadingStartedAt else { return }
+        let remaining = Duration.milliseconds(300) - started.duration(to: .now)
+        if remaining <= .zero {
+            showsQuotaLoading = false; quotaLoadingStartedAt = nil
+            return
+        }
+        quotaLoadingTask = Task { [weak self] in
+            do { try await Task.sleep(for: remaining) } catch { return }
+            guard let self, !Task.isCancelled, !self.isRefreshingUsage else { return }
+            self.showsQuotaLoading = false; self.quotaLoadingStartedAt = nil
+            self.quotaLoadingTask = nil
+        }
+    }
     private func scheduleWake() {
         pollTask?.cancel(); pollTask = nil
         guard automaticallySchedule, canPoll else { return }
         var dates: [Date] = []
-        if !isRefreshing { dates += [nextRuntimeAt, nextStatusAt].compactMap { $0 } }
-        if !isRefreshingQuota, !latestAccounts.isEmpty, let nextRefreshAt { dates.append(nextRefreshAt) }
+        if !isRefreshing, let nextRuntimeAt { dates.append(nextRuntimeAt) }
+        if quotaTask == nil, let nextRefreshAt { dates.append(nextRefreshAt) }
         guard let next = dates.min() else { return }
         let delay = max(0.05, next.timeIntervalSince(now())); let token = generation
         pollTask = Task { [weak self] in
@@ -364,10 +457,13 @@ final class AppStore: ObservableObject {
     }
     private func cancelPolling() {
         generation = UUID()
-        for task in [runtimeTask, quotaTask, upstreamTask, pollTask] { task?.cancel() }
-        runtimeTask = nil; quotaTask = nil; upstreamTask = nil; pollTask = nil
-        isRefreshing = false; isRefreshingQuota = false; isRefreshingUpstream = false
-        nextRuntimeAt = nil; nextStatusAt = nil; nextRefreshAt = nil
+        for task in [runtimeTask, quotaTask, pollTask] { task?.cancel() }
+        // Keep the quota task as a lock until its cancellation has completed.
+        runtimeTask = nil; pollTask = nil
+        isRefreshing = false; isRefreshingQuota = false
+        quotaLoadingTask?.cancel(); quotaLoadingTask = nil
+        showsQuotaLoading = false; quotaLoadingStartedAt = nil
+        nextRuntimeAt = nil; nextRefreshAt = nil
     }
     private func resetAllRequests() {
         cancelPolling(); accountsGeneration = UUID(); accountsTask?.cancel(); accountsTask = nil; isLoadingAccounts = false

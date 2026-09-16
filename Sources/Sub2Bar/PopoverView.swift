@@ -39,36 +39,24 @@ struct PopoverView: View {
             }
             Spacer()
             refreshStatus
-            if store.isRefreshing { ProgressView().controlSize(.small).scaleEffect(0.75) }
-            Button { store.refresh() } label: {
-                Image(systemName: "arrow.clockwise").font(.system(size: 14, weight: .medium))
-                    .frame(width: 20, height: 20)
-            }
-            .buttonStyle(NeutralButtonStyle(.ghost, compact: true)).disabled(store.isRefreshing || store.needsCredentialAccess || !store.isPanelVisible || !store.isConfigured || store.pinCount == 0)
-            .help("立即刷新").accessibilityLabel("立即刷新")
+            QuotaRefreshButton(isLoading: store.showsQuotaLoading,
+                               isEnabled: !store.needsCredentialAccess && store.isPanelVisible && store.isConfigured && store.pinCount > 0,
+                               action: store.refresh)
         }
         .padding(.horizontal, 20).padding(.vertical, 17)
     }
 
-    @ViewBuilder
     private var refreshStatus: some View {
-        if store.isPanelVisible && store.nextRefreshAt != nil {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                Label(refreshLabel(at: context.date), systemImage: "timer")
-                    .font(.system(size: 11, weight: .medium)).monospacedDigit()
-                    .fixedSize().layoutPriority(1).foregroundStyle(.primary)
-            }
-        } else {
-            Text(refreshLabel(at: .now))
-                .font(.system(size: 11)).foregroundStyle(.secondary)
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            QuotaRefreshStatus(text: refreshLabel(at: context.date))
         }
     }
 
     private func refreshLabel(at date: Date) -> String {
         if store.needsCredentialAccess { return store.isLoadingCredential ? "载入中" : "待配置" }
-        if store.isRefreshingQuota { return "额度刷新中" }
+        if store.showsQuotaLoading { return "额度刷新 00:00" }
         if let seconds = store.secondsUntilRefresh(at: date) {
-            return seconds > 0 ? String(format: "额度刷新 %02d:%02d", seconds / 60, seconds % 60) : "即将刷新"
+            return String(format: "额度刷新 %02d:%02d", seconds / 60, seconds % 60)
         }
         return store.pinCount == 0 ? "" : "已暂停"
     }
@@ -127,31 +115,21 @@ struct PopoverView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10).insetSurface(cornerRadius: 8)
             }
-            HStack(spacing: 6) {
-                Circle().fill(Theme.accent).frame(width: 5, height: 5)
-                Text("账号 \(store.pinCount) · 可调度 \(store.activeCount)")
-                Spacer()
-                if store.warningCount > 0 {
-                    Label("提醒 \(store.warningCount)", systemImage: "exclamationmark.circle")
-                        .foregroundStyle(.primary)
-                } else {
-                    Button("管理 Pin", action: openSettings).buttonStyle(.plain)
+            if store.showsAccountFilters {
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("搜索已 Pin 账号", text: $store.search).textFieldStyle(.plain)
+                    if !store.search.isEmpty {
+                        Button { store.search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
+                            .buttonStyle(.plain).accessibilityLabel("清空搜索")
+                    }
+                    Picker("平台", selection: $store.platform) {
+                        ForEach(store.platforms, id: \.self) { Text($0).tag($0) }
+                    }.labelsHidden().frame(width: 100).controlSize(.small)
                 }
-            }.font(.system(size: 11)).foregroundStyle(.secondary)
-
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("搜索已 Pin 账号", text: $store.search).textFieldStyle(.plain)
-                if !store.search.isEmpty {
-                    Button { store.search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
-                        .buttonStyle(.plain).accessibilityLabel("清空搜索")
-                }
-                Picker("平台", selection: $store.platform) {
-                    ForEach(store.platforms, id: \.self) { Text($0).tag($0) }
-                }.labelsHidden().frame(width: 100).controlSize(.small)
+                .font(.system(size: 12)).padding(9)
+                .insetSurface(cornerRadius: 7)
             }
-            .font(.system(size: 12)).padding(9)
-            .insetSurface(cornerRadius: 7)
 
             if store.snapshots.isEmpty && store.pinnedAccountErrors.isEmpty {
                 VStack(spacing: 12) {
@@ -172,11 +150,11 @@ struct PopoverView: View {
                                 Text(store.pinnedAccountErrors[id] ?? "")
                                     .font(.system(size: 11)).foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
-                                Button("管理 Pin", action: openSettings).buttonStyle(NeutralButtonStyle(.outline))
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(13).insetSurface(cornerRadius: 9)
                         }
                         ForEach(store.filtered.filter { store.pinnedAccountErrors[$0.id] == nil }) { snapshot in
-                            AccountCard(snapshot: snapshot, stale: store.errorMessage != nil)
+                            AccountCard(snapshot: snapshot, stale: store.errorMessage != nil,
+                                        isPanelVisible: store.isPanelVisible)
                         }
                         if store.filtered.isEmpty && store.pinnedAccountErrors.isEmpty {
                             Text("没有匹配的账号").foregroundStyle(.secondary).padding(30)
@@ -204,13 +182,21 @@ struct PopoverView: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: 12) {
-                TimelineView(.periodic(from: .now, by: 15)) { context in
+                VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 5) {
-                        Image(systemName: statusSymbol(now: context.date))
-                            .font(.system(size: 9)).foregroundStyle(.secondary)
-                        Text(updateLabel(now: context.date)).font(.system(size: 10)).foregroundStyle(.secondary)
+                        Image(systemName: store.connectionState.symbol)
+                            .font(.system(size: 9))
+                        Text(store.connectionState.rawValue).font(.system(size: 10))
+                    }
+                    if store.isConfigured && !store.needsCredentialAccess {
+                        Text(accountSummary)
+                            .font(.system(size: 10)).monospacedDigit()
+                            .lineLimit(1).minimumScaleFactor(0.8)
+                            .help(accountSummary)
                     }
                 }
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
                 Spacer()
                 Button { store.openDashboard() } label: { Image(systemName: "arrow.up.right.square") }
                     .disabled(!store.isConfigured).help("打开 sub2api 后台").accessibilityLabel("打开 sub2api 后台")
@@ -223,21 +209,9 @@ struct PopoverView: View {
         }
     }
 
-    private func statusSymbol(now: Date) -> String {
-        guard let last = store.lastUpdated else { return "circle.dotted" }
-        return store.errorMessage != nil || store.partialErrors > 0 || now.timeIntervalSince(last) > store.configuration.effectiveRefreshInterval * 2 ? "exclamationmark.circle" : "checkmark.circle"
-    }
-    private func updateLabel(now: Date) -> String {
-        if store.needsCredentialAccess { return "待配置 · 已暂停" }
-        if store.isConfigured && store.pinCount == 0 { return "未选择账号" }
-        if !store.isPanelVisible { return "已暂停" }
-        if store.isRefreshingUpstream { return "同步完整额度 · 并发每 2 秒" }
-        guard let last = store.lastUpdated else { return "等待连接" }
-        let seconds = max(0, Int(now.timeIntervalSince(last)))
-        let age = seconds < 60 ? "刚刚更新" : "\(seconds / 60) 分钟前更新"
-        if store.errorMessage != nil || seconds > Int(store.configuration.effectiveRefreshInterval * 2) { return "已过期 · \(age)" }
-        if store.partialErrors > 0 { return "\(age) · \(store.partialErrors) 个账号异常" }
-        return "并发 2 秒 · 状态 5 秒"
+    private var accountSummary: String {
+        "账号 \(store.pinCount) · 可调度 \(store.activeCount)" +
+            (store.warningCount > 0 ? " · 提醒 \(store.warningCount)" : "")
     }
 
     private var noPins: some View {
@@ -255,9 +229,49 @@ struct PopoverView: View {
     }
 }
 
+struct QuotaRefreshStatus: View {
+    let text: String
+
+    var body: some View {
+        Label(text, systemImage: "timer")
+            .font(.system(size: 11, weight: .medium)).monospacedDigit()
+            .lineLimit(1).foregroundStyle(.primary)
+            .frame(width: 124, height: 20, alignment: .trailing)
+            .transaction { $0.animation = nil }
+    }
+}
+
+struct QuotaRefreshButton: View {
+    let isLoading: Bool
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Group {
+            if isLoading {
+                ProgressView().controlSize(.small).scaleEffect(0.75)
+                    .frame(width: 20, height: 20).padding(6)
+                    .help("额度刷新中").accessibilityLabel("额度刷新中")
+            } else {
+                Button(action: action) {
+                    Image(systemName: "arrow.clockwise").resizable().scaledToFit()
+                        .frame(width: 12, height: 12)
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(NeutralButtonStyle(.ghost, compact: true))
+                .disabled(!isEnabled)
+                .help("立即刷新").accessibilityLabel("立即刷新")
+            }
+        }
+        .frame(width: 32, height: 32)
+        .transaction { $0.animation = nil }
+    }
+}
+
 struct AccountCard: View {
     let snapshot: AccountSnapshot
     let stale: Bool
+    let isPanelVisible: Bool
     @State private var expanded = false
     private var account: Account { snapshot.account }
 
@@ -265,8 +279,7 @@ struct AccountCard: View {
         VStack(alignment: .leading, spacing: 11) {
             Button { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } } label: {
                 HStack(spacing: 9) {
-                    Text(String(account.platformLabel.prefix(1)))
-                        .font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                    ProviderIcon(platform: account.platform)
                         .frame(width: 28, height: 28).insetSurface(cornerRadius: 6)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(account.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
@@ -290,8 +303,13 @@ struct AccountCard: View {
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain).help("展开账号详情")
 
-            usageLine(title: "5 小时", percentage: snapshot.usage?.fiveHour?.percentage)
-            usageLine(title: "7 天", percentage: snapshot.weeklyPercentage)
+            if isPanelVisible {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    quotaLines(at: context.date)
+                }
+            } else {
+                quotaLines(at: .now)
+            }
             HStack(spacing: 4) {
                 Text("周额度估算")
                 Text(money(snapshot.estimatedWeeklyCost)).foregroundStyle(.primary).monospacedDigit()
@@ -313,7 +331,16 @@ struct AccountCard: View {
         .opacity(stale ? 0.65 : 1)
     }
 
-    private func usageLine(title: String, percentage: Double?) -> some View {
+    private func quotaLines(at date: Date) -> some View {
+        VStack(spacing: 11) {
+            usageLine(title: "5 小时", percentage: snapshot.usage?.fiveHour?.percentage,
+                      resetCountdown: ResetCountdown.text(until: snapshot.usage?.fiveHour?.resetDate, at: date))
+            usageLine(title: "7 天", percentage: snapshot.weeklyPercentage,
+                      resetCountdown: ResetCountdown.text(until: snapshot.usage?.sevenDay?.resetDate, at: date))
+        }
+    }
+
+    private func usageLine(title: String, percentage: Double?, resetCountdown: String? = nil) -> some View {
         HStack(spacing: 8) {
             Text(title).font(.system(size: 10)).foregroundStyle(.secondary).frame(width: 38, alignment: .leading)
             GeometryReader { geo in
@@ -327,8 +354,14 @@ struct AccountCard: View {
             Text(percentage.map { String(format: "%.1f%%", $0) } ?? "—")
                 .font(.system(size: 10, weight: .medium)).monospacedDigit()
                 .foregroundStyle(Theme.usageColor(percentage)).frame(width: 47, alignment: .trailing)
+            if let resetCountdown {
+                Label(resetCountdown, systemImage: "clock.arrow.circlepath")
+                    .font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
+                    .lineLimit(1).fixedSize().frame(width: 82, alignment: .leading)
+                    .help("\(title)额度重置：\(resetCountdown)")
+            }
         }.accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(title)已用 \(percentage.map { String(format: "%.1f%%", $0) } ?? "未知")")
+            .accessibilityLabel("\(title)已用 \(percentage.map { String(format: "%.1f%%", $0) } ?? "未知")\(resetCountdown.map { "，重置 \($0)" } ?? "")")
     }
 
     private var details: some View {

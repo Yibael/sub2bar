@@ -1,7 +1,7 @@
 import SwiftUI
 import Sub2BarCore
 
-private enum SettingsPage: String, CaseIterable, Identifiable {
+enum SettingsPage: String, CaseIterable, Identifiable {
     case connection = "连接", refresh = "刷新", accounts = "菜单栏账号"
     var id: Self { self }
     var symbol: String {
@@ -26,10 +26,12 @@ struct SettingsView: View {
     @State private var connectionTask: Task<Void, Never>?
     @State private var saveTask: Task<Void, Never>?
 
-    init(store: AppStore) {
+    init(store: AppStore, page: SettingsPage = .connection) {
         self.store = store
+        _page = State(initialValue: page)
         var initial = store.configuration
         initial.refreshInterval = initial.effectiveRefreshInterval
+        initial.accountRefreshInterval = initial.effectiveAccountRefreshInterval
         _draft = State(initialValue: initial)
     }
 
@@ -59,7 +61,7 @@ struct SettingsView: View {
                     case .accounts:
                         VStack(spacing: 10) {
                             if draft != store.configuration {
-                                Text("连接设置尚未保存，账号列表使用已保存的服务器。")
+                                Text("设置尚未保存，账号列表使用已保存的服务器。")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             PinnedAccountsView(store: store, configure: { page = .connection })
@@ -98,6 +100,7 @@ struct SettingsView: View {
             if !value.isEmpty { loadedIdentity = try? draft.baseURL().absoluteString }
         }
         .onChange(of: draft.refreshInterval) { _, _ in message = nil }
+        .onChange(of: draft.accountRefreshInterval) { _, _ in message = nil }
         .onChange(of: draft.allowHTTP) { _, _ in message = nil; connectionMessage = nil }
     }
 
@@ -137,21 +140,26 @@ struct SettingsView: View {
     private var refreshForm: some View {
         Form {
             Section {
-                LabeledContent("当前并发与上限", value: "2 秒")
-                LabeledContent("调度、停用、错误与限流状态", value: "5 秒")
-                Picker("额度快照刷新", selection: $draft.refreshInterval) {
+                Picker("账号状态刷新间隔", selection: $draft.accountRefreshInterval) {
+                    ForEach(Configuration.accountIntervals, id: \.self) { interval in
+                        Text("\(Int(interval)) 秒").tag(interval)
+                    }
+                }
+            } header: { Text("账号状态") }
+            footer: { Text("更新并发、并发上限、调度及异常状态。") }
+
+            Section {
+                Picker("额度与费用刷新间隔", selection: $draft.refreshInterval) {
                     ForEach(Configuration.quotaIntervals, id: \.self) { interval in
                         Text("\(Int(interval)) 秒").tag(interval)
                     }
                 }
-            } header: { Text("面板打开时") }
-            footer: { Text("额度快照读取 sub2api 已有数据。关闭面板后，所有自动刷新停止。") }
+            } header: { Text("额度与费用") }
+            footer: { Text("一起更新使用比例、重置时间、窗口费用和周额度估算。使用普通查询，不强制刷新上游；sub2api 仍可能按需查询上游。") }
 
             Section {
-                LabeledContent("完整额度与窗口统计", value: "至少间隔 10 分钟")
-            } header: { Text("高成本查询") }
-            footer: {
-                Text("OpenAI 主动额度接口可能访问上游。首次打开时查询，之后每账号至少间隔 10 分钟；手动刷新和重新打开面板不会绕过限制。窗口计费和周额度估算保留最近一次完整采样，不能视为每 5 秒更新。")
+                Text("仅面板打开时自动刷新。请求完成后重新计时，失败时延后重试。保存刷新间隔会保留已有数据。")
+                    .font(.callout).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped).disabled(busy)
     }

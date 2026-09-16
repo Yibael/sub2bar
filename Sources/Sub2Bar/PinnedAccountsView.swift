@@ -101,8 +101,7 @@ struct PinnedAccountsView: View {
 
     private func accountRow(_ account: Account) -> some View {
         HStack(spacing: 12) {
-            Text(String(account.platformLabel.prefix(1)))
-                .font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+            ProviderIcon(platform: account.platform)
                 .frame(width: 30, height: 30).insetSurface(cornerRadius: 6)
             VStack(alignment: .leading, spacing: 4) {
                 Text(account.name).font(.system(size: 12, weight: .medium)).lineLimit(1)

@@ -76,9 +76,14 @@ final class CredentialSession {
         let key = try Self.validated(raw)
         // Changing only the refresh interval must not rewrite the local secret.
         if cachedKey(for: server) == key { return }
+        let previous = entry
         clear()
         let token = generation
-        try await storage.write(key, for: server)
+        do { try await storage.write(key, for: server) }
+        catch {
+            if generation == token { entry = previous }
+            throw error
+        }
         guard generation == token, !Task.isCancelled else { throw CancellationError() }
         entry = Entry(server: server, key: key)
     }

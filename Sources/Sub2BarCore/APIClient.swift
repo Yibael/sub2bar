@@ -31,9 +31,16 @@ public final class APIClient: @unchecked Sendable {
     deinit { session.invalidateAndCancel() }
 
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
+        try await request(path, query: query)
+    }
+
+    private func request<T: Decodable>(_ path: String, query: [URLQueryItem] = [], method: String = "GET", body: Data? = nil) async throws -> T {
         try Task.checkCancellation()
         guard !key.isEmpty, !key.contains("\n"), !key.contains("\r") else { throw APIError.missingKey }
         var request = URLRequest(url: try configuration.endpoint(path, query: query))
+        request.httpMethod = method
+        request.httpBody = body
+        if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         request.setValue(key, forHTTPHeaderField: "x-api-key")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -90,8 +97,31 @@ public final class APIClient: @unchecked Sendable {
         // There is no OpenAI cache-only /usage endpoint in the audited backend.
         guard !passive || account.supportsPassiveUsage else { throw APIError.invalidResponse }
         return try await get("accounts/\(account.id)/usage", query: [
-            URLQueryItem(name: "source", value: passive ? "passive" : "active")
+            URLQueryItem(name: "source", value: passive ? "passive" : "active"),
+            URLQueryItem(name: "force", value: "false")
         ])
+    }
+
+    /// Read-only batch query. Never expose upstream error bodies to the UI.
+    public func loadUsageBatch(ids: [Int]) async throws -> [AccountUsageResult] {
+        struct Body: Encodable { let account_ids: [Int]; let force = false }
+        struct Payload: Decodable { let usage: [String: UsageInfo]; let errors: [String: String]? }
+        var seen = Set<Int>()
+        let ids = ids.filter { $0 > 0 && seen.insert($0).inserted }
+        var results: [AccountUsageResult] = []
+        for start in stride(from: 0, to: ids.count, by: 100) {
+            try Task.checkCancellation()
+            let chunk = Array(ids[start..<min(start + 100, ids.count)])
+            let data = try JSONEncoder().encode(Body(account_ids: chunk))
+            let response: Payload = try await request("accounts/usage/batch", method: "POST", body: data)
+            for id in chunk {
+                let value = response.usage[String(id)]
+                let failed = response.errors?[String(id)] != nil || value == nil || value?.hasError == true
+                results.append(AccountUsageResult(id: id, usage: failed ? nil : value,
+                                                  error: failed ? "额度读取失败" : nil))
+            }
+        }
+        return results
     }
 
     public func loadPinnedSnapshot(ids: [Int]) async throws -> PinnedSnapshotResult {

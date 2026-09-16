@@ -146,6 +146,15 @@ public struct UsageInfo: Decodable, Sendable {
     }
 }
 
+public struct AccountUsageResult: Sendable {
+    public let id: Int
+    public let usage: UsageInfo?
+    public let error: String?
+    public init(id: Int, usage: UsageInfo?, error: String?) {
+        self.id = id; self.usage = usage; self.error = error
+    }
+}
+
 public struct AccountSnapshot: Identifiable, Sendable {
     public let account: Account
     public let usage: UsageInfo?

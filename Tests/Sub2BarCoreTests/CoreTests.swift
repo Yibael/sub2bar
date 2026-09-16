@@ -2,13 +2,14 @@ import XCTest
 @testable import Sub2BarCore
 
 final class CoreTests: XCTestCase {
-    func testVisibleRefreshIntervalDefaultsToFiveSecondsAndClampsSafely() {
-        XCTAssertEqual(Configuration().refreshInterval, 5)
+    func testQuotaIntervalDefaultsToThirtySecondsAndSupportsFiveSeconds() {
+        XCTAssertEqual(Configuration().refreshInterval, 30)
         XCTAssertEqual(Configuration(refreshInterval: 5).effectiveRefreshInterval, 5)
         XCTAssertEqual(Configuration(refreshInterval: 1).effectiveRefreshInterval, 5)
-        XCTAssertEqual(Configuration(refreshInterval: 1000).effectiveRefreshInterval, 60)
-        XCTAssertEqual(Configuration(refreshInterval: .nan).effectiveRefreshInterval, 5)
-        XCTAssertEqual(Configuration(refreshInterval: .infinity).effectiveRefreshInterval, 5)
+        XCTAssertEqual(Configuration(refreshInterval: 1000).effectiveRefreshInterval, 120)
+        XCTAssertEqual(Configuration(refreshInterval: .nan).effectiveRefreshInterval, 30)
+        XCTAssertEqual(Configuration(refreshInterval: .infinity).effectiveRefreshInterval, 30)
+        XCTAssertEqual(Configuration(refreshInterval: 6).effectiveRefreshInterval, 10)
     }
 
     func testRefreshIntervalRoundTripPreservesNewAndExistingChoices() throws {
@@ -16,8 +17,27 @@ final class CoreTests: XCTestCase {
             let original = Configuration(serverURL: "https://example.com", refreshInterval: interval)
             let restored = try JSONDecoder().decode(Configuration.self, from: JSONEncoder().encode(original))
             XCTAssertEqual(restored.refreshInterval, interval)
-            XCTAssertEqual(restored.effectiveRefreshInterval, min(interval, 60))
+            XCTAssertEqual(restored.effectiveRefreshInterval, min(interval, 120))
         }
+    }
+
+    func testLegacyConfigurationRetainsQuotaIntervalAndAddsAccountDefault() throws {
+        let data = Data(#"{"serverURL":"https://example.invalid","refreshInterval":5,"allowHTTP":false}"#.utf8)
+        let config = try JSONDecoder().decode(Configuration.self, from: data)
+        XCTAssertEqual(config.refreshInterval, 5)
+        XCTAssertEqual(config.effectiveAccountRefreshInterval, 2)
+    }
+
+    func testAccountIntervalRoundTripsAndClamps() throws {
+        for interval in Configuration.accountIntervals {
+            let config = Configuration(accountRefreshInterval: interval)
+            let restored = try JSONDecoder().decode(Configuration.self, from: JSONEncoder().encode(config))
+            XCTAssertEqual(restored.effectiveAccountRefreshInterval, interval)
+        }
+        XCTAssertEqual(Configuration(accountRefreshInterval: 0).effectiveAccountRefreshInterval, 2)
+        XCTAssertEqual(Configuration(accountRefreshInterval: 3).effectiveAccountRefreshInterval, 5)
+        XCTAssertEqual(Configuration(accountRefreshInterval: 300).effectiveAccountRefreshInterval, 30)
+        XCTAssertEqual(Configuration(accountRefreshInterval: .nan).effectiveAccountRefreshInterval, 2)
     }
 
     func testURLNormalizationAndProxyPrefix() throws {

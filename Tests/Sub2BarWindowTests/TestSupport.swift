@@ -7,6 +7,7 @@ actor MemoryVault: CredentialStorage {
     var reads = 0
     var writes = 0
     var denied = false
+    var writesDenied = false
     var holding = false
     var pending: [CheckedContinuation<String, Error>] = []
     init(values: [String: String] = ["https://example.invalid": "fake-secret"]) { self.values = values }
@@ -16,9 +17,14 @@ actor MemoryVault: CredentialStorage {
         if holding { return try await withCheckedThrowingContinuation { pending.append($0) } }
         return values[server] ?? ""
     }
-    func write(_ key: String, for server: String) async throws { writes += 1; values[server] = key }
+    func write(_ key: String, for server: String) async throws {
+        writes += 1
+        if writesDenied { throw LocalCredentialError.unavailable }
+        values[server] = key
+    }
     func counts() -> (reads: Int, writes: Int) { (reads, writes) }
     func deny() { denied = true }
+    func denyWrites() { writesDenied = true }
     func hold() { holding = true }
     func complete(_ key: String) { let items = pending; pending = []; for item in items { item.resume(returning: key) } }
 }
@@ -28,19 +34,32 @@ final class MockBackend: @unchecked Sendable {
     private var paths: [String] = []
     private var _concurrency = 1
     private var _percentage = 40.0
+    private var _usagePercentage = 50.0
+    private var _usageCost = 25.0
+    private var _batchUnavailable = false
+    private var batches: [[Int]] = []
     private var _status = "active"
     private var _error = 0
     private var _usageError = 0
+    private var _failedUsageIDs: Set<Int> = []
     private var _platform = "openai"
     private var _delayActive = 0.0
+    private var _delayPassive = 0.0
     private var _delayRuntime = 0.0
     var concurrency: Int { get { lock.withLock { _concurrency } } set { lock.withLock { _concurrency = newValue } } }
     var percentage: Double { get { lock.withLock { _percentage } } set { lock.withLock { _percentage = newValue } } }
+    var usagePercentage: Double { get { lock.withLock { _usagePercentage } } set { lock.withLock { _usagePercentage = newValue } } }
+    var usageCost: Double { get { lock.withLock { _usageCost } } set { lock.withLock { _usageCost = newValue } } }
+    var batchUnavailable: Bool { get { lock.withLock { _batchUnavailable } } set { lock.withLock { _batchUnavailable = newValue } } }
+    var batchIDs: [[Int]] { lock.withLock { batches } }
+    var batchCount: Int { requests.filter { $0.hasSuffix("/usage/batch") }.count }
     var status: String { get { lock.withLock { _status } } set { lock.withLock { _status = newValue } } }
     var error: Int { get { lock.withLock { _error } } set { lock.withLock { _error = newValue } } }
     var usageError: Int { get { lock.withLock { _usageError } } set { lock.withLock { _usageError = newValue } } }
+    var failedUsageIDs: Set<Int> { get { lock.withLock { _failedUsageIDs } } set { lock.withLock { _failedUsageIDs = newValue } } }
     var platform: String { get { lock.withLock { _platform } } set { lock.withLock { _platform = newValue } } }
     var delayActive: Double { get { lock.withLock { _delayActive } } set { lock.withLock { _delayActive = newValue } } }
+    var delayPassive: Double { get { lock.withLock { _delayPassive } } set { lock.withLock { _delayPassive = newValue } } }
     var delayRuntime: Double { get { lock.withLock { _delayRuntime } } set { lock.withLock { _delayRuntime = newValue } } }
     var requests: [String] { lock.withLock { paths } }
     var activeCount: Int { requests.filter { $0.contains("source=active") }.count }
@@ -51,14 +70,32 @@ final class MockBackend: @unchecked Sendable {
         lock.withLock {
             let url = request.url!
             paths.append(url.path + (url.query.map { "?" + $0 } ?? ""))
-            XCTAssertEqual(request.httpMethod, "GET")
+            let isBatch = url.path.hasSuffix("/usage/batch")
+            XCTAssertEqual(request.httpMethod, isBatch ? "POST" : "GET")
             XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "fake-secret")
             XCTAssertFalse(url.absoluteString.contains("force=true"))
             if _error > 0 { return (_error, "private-secret-error", 0) }
-            if url.path.hasSuffix("/usage") {
+            let usage: [String: Any] = ["updated_at": "2026-09-15T10:00:00Z", "five_hour": ["utilization": 20],
+                                       "seven_day": ["utilization": _usagePercentage, "window_stats": ["cost": _usageCost]]]
+            if isBatch {
+                let body = (try? JSONSerialization.jsonObject(with: testRequestBody(request))) as? [String: Any]
+                XCTAssertEqual(body?["force"] as? Bool, false)
+                let ids = body?["account_ids"] as? [Int] ?? []
+                XCTAssertFalse(ids.isEmpty)
+                batches.append(ids)
+                if _batchUnavailable { return (404, "not found", 0) }
                 if _usageError > 0 { return (_usageError, "private-secret-error", 0) }
-                return (200, #"{"code":0,"data":{"updated_at":"2026-09-15T10:00:00Z","five_hour":{"utilization":20},"seven_day":{"utilization":50,"window_stats":{"cost":25}}}}"#,
-                        url.query?.contains("source=active") == true ? _delayActive : 0)
+                let values = Dictionary(uniqueKeysWithValues: ids.filter { !_failedUsageIDs.contains($0) }.map { (String($0), usage) })
+                let errors = Dictionary(uniqueKeysWithValues: ids.filter { _failedUsageIDs.contains($0) }.map { (String($0), "unavailable") })
+                let data = try! JSONSerialization.data(withJSONObject: ["code": 0, "data": ["usage": values, "errors": errors]])
+                return (200, String(decoding: data, as: UTF8.self), _platform == "anthropic" ? _delayPassive : _delayActive)
+            }
+            if url.path.hasSuffix("/usage") {
+                XCTAssertTrue(url.absoluteString.contains("force=false"))
+                if _usageError > 0 { return (_usageError, "private-secret-error", 0) }
+                let data = try! JSONSerialization.data(withJSONObject: ["code": 0, "data": usage])
+                return (200, String(decoding: data, as: UTF8.self),
+                        url.query?.contains("source=active") == true ? _delayActive : _delayPassive)
             }
             let id = Int(url.lastPathComponent) ?? 1
             let item = "{\"id\":\(id),\"name\":\"Account \(id)\",\"platform\":\"\(_platform)\",\"type\":\"oauth\",\"status\":\"\(_status)\",\"schedulable\":true,\"concurrency\":5,\"current_concurrency\":\(_concurrency),\"extra\":{\"codex_5h_used_percent\":10,\"codex_7d_used_percent\":\(_percentage),\"codex_usage_updated_at\":\"2026-09-15T10:00:00Z\",\"codex_7d_reset_at\":\"2026-09-20T10:00:00Z\"}}"
@@ -98,14 +135,14 @@ final class StoreFixture {
     let backend = MockBackend()
     var date = parseAPIDate("2026-09-15T10:00:00Z")!
     var store: AppStore!
-    init(ids: [Int] = [1], interval: Double = 5, vault: MemoryVault = MemoryVault(), automatic: Bool = false) throws {
+    init(ids: [Int] = [1], interval: Double = 5, vault: MemoryVault = MemoryVault(), automatic: Bool = false, accountInterval: Double = 2) throws {
         defaults = UserDefaults(suiteName: name)!; self.vault = vault
-        defaults.set(try JSONEncoder().encode(Configuration(serverURL: "https://example.invalid", refreshInterval: interval)), forKey: "sub2bar.configuration.v1")
+        defaults.set(try JSONEncoder().encode(Configuration(serverURL: "https://example.invalid", refreshInterval: interval, accountRefreshInterval: accountInterval)), forKey: "sub2bar.configuration.v1")
         var pins = PinnedAccountSelection()
         for id in ids { pins.setPinned(true, id: id, server: "https://example.invalid") }
         defaults.set(try JSONEncoder().encode(pins), forKey: "sub2bar.pins.v1")
         MonitorURLProtocol.backend = backend
-        store = AppStore(defaults: defaults, credentials: CredentialSession(storage: vault), now: { [weak self] in self!.date }, automaticallySchedule: automatic,
+        store = AppStore(defaults: defaults, credentials: CredentialSession(storage: vault), now: { [weak self] in self?.date ?? Date() }, automaticallySchedule: automatic,
                          clientFactory: { config, key in
             let sessionConfig = URLSessionConfiguration.ephemeral
             sessionConfig.protocolClasses = [MonitorURLProtocol.self]
@@ -123,11 +160,24 @@ final class StoreFixture {
     func open() async {
         let previous = backend.detailCount
         store.setPanelVisible(true)
-        await until { self.backend.detailCount > previous && !self.store.isRefreshing && !self.store.isRefreshingQuota && !self.store.isRefreshingUpstream }
+        await until { self.backend.detailCount > previous && !self.store.isRefreshing && !self.store.isRefreshingQuota }
     }
     func tick(_ seconds: Double) async {
         date = date.addingTimeInterval(seconds)
         store.runDueRefreshes()
-        await until { !self.store.isRefreshing && !self.store.isRefreshingQuota && !self.store.isRefreshingUpstream }
+        await until { !self.store.isRefreshing && !self.store.isRefreshingQuota }
     }
+}
+
+func testRequestBody(_ request: URLRequest) -> Data {
+    if let data = request.httpBody { return data }
+    guard let stream = request.httpBodyStream else { return Data() }
+    stream.open(); defer { stream.close() }
+    var data = Data(); var bytes = [UInt8](repeating: 0, count: 1024)
+    while data.count < 65_536 {
+        let count = stream.read(&bytes, maxLength: bytes.count)
+        if count <= 0 { break }
+        data.append(contentsOf: bytes.prefix(count))
+    }
+    return data
 }

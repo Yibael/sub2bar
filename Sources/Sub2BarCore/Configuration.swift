@@ -1,21 +1,41 @@
 import Foundation
 
 public struct Configuration: Codable, Equatable, Sendable {
-    public static let defaultRefreshInterval: Double = 5
+    public static let defaultRefreshInterval: Double = 30
     public static let minimumRefreshInterval: Double = 5
-    public static let maximumRefreshInterval: Double = 60
-    public static let quotaIntervals: [Double] = [5, 10, 15, 30, 60]
-    public static let concurrencyInterval: Double = 2
-    public static let statusInterval: Double = 5
-    public static let upstreamMinimumInterval: Double = 600
+    public static let maximumRefreshInterval: Double = 120
+    public static let quotaIntervals: [Double] = [5, 10, 15, 30, 60, 120]
+    public static let accountIntervals: [Double] = [2, 5, 10, 15, 30]
+    public static let defaultAccountRefreshInterval: Double = 2
     public var serverURL: String
     public var refreshInterval: Double
+    public var accountRefreshInterval: Double
     public var allowHTTP: Bool
 
-    public init(serverURL: String = "", refreshInterval: Double = Configuration.defaultRefreshInterval, allowHTTP: Bool = false) {
+    public init(serverURL: String = "", refreshInterval: Double = Configuration.defaultRefreshInterval,
+                allowHTTP: Bool = false, accountRefreshInterval: Double = Configuration.defaultAccountRefreshInterval) {
         self.serverURL = serverURL
         self.refreshInterval = refreshInterval
         self.allowHTTP = allowHTTP
+        self.accountRefreshInterval = accountRefreshInterval
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case serverURL, refreshInterval, accountRefreshInterval, allowHTTP
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        serverURL = try values.decodeIfPresent(String.self, forKey: .serverURL) ?? ""
+        // Preserve the user's existing quota interval when upgrading.
+        refreshInterval = try values.decodeIfPresent(Double.self, forKey: .refreshInterval) ?? Self.defaultRefreshInterval
+        accountRefreshInterval = try values.decodeIfPresent(Double.self, forKey: .accountRefreshInterval) ?? Self.defaultAccountRefreshInterval
+        allowHTTP = try values.decodeIfPresent(Bool.self, forKey: .allowHTTP) ?? false
+    }
+
+    public var effectiveAccountRefreshInterval: Double {
+        guard accountRefreshInterval.isFinite else { return Self.defaultAccountRefreshInterval }
+        return Self.accountIntervals.first(where: { $0 >= accountRefreshInterval }) ?? 30
     }
 
     public var effectiveRefreshInterval: Double {
