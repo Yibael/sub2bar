@@ -14,6 +14,8 @@ concurrency:
 jobs:
   verify:
     name: Validate release and scan history
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -22,10 +24,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Require a versioned commit on master
+        id: version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python3 scripts/verify-release.py "$RELEASE_TAG"
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
           git merge-base --is-ancestor "$GITHUB_SHA" origin/master
           python3 scripts/check-repository.py
           python3 -m unittest discover -s scripts/tests -v
@@ -85,7 +93,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [verify, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -103,9 +111,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
+          IS_PRERELEASE: ${{ needs.verify.outputs.prerelease }}
         run: |
+          release_flags=()
+          case "$IS_PRERELEASE" in
+            true) release_flags=(--prerelease --latest=false) ;;
+            false) release_flags=(--prerelease=false) ;;
+            *) echo "Missing release classification." >&2; exit 1 ;;
+          esac
           gh release create "$RELEASE_TAG" release-assets/*.zip release-assets/*.sha256 \
             --repo "$GH_REPO" --verify-tag --generate-notes --draft \
+            "${release_flags[@]}" \
             --title "Sub2Bar $RELEASE_TAG" \
             --notes "Universal macOS build (Apple Silicon + Intel), macOS 14+. Ad-hoc signed; not Developer ID signed or notarized. Admin Key is stored locally in plaintext with owner-only file permissions. No Admin Key or signing certificate is needed by this workflow."
-          gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false
+          gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false "${release_flags[@]}"

@@ -47,7 +47,7 @@ struct SettingsView: View {
                     Label(item.rawValue, systemImage: item.symbol).tag(item)
                         .padding(.vertical, 3)
                 }.listStyle(.sidebar).scrollContentBackground(.hidden)
-                Text("版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版")")
+                Text("版本 \(AppVersion.display(in: Bundle.main.infoDictionary))")
                     .font(.caption).foregroundStyle(.tertiary).padding(18)
             }.frame(width: 172).background(Color(nsColor: .windowBackgroundColor))
             Divider()

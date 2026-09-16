@@ -27,7 +27,8 @@ final class AppearanceTests: XCTestCase {
     func testSettingsAndPanelCanRenderOffscreen() async throws {
         let f = try StoreFixture(); defer { f.cleanup() }
         await f.open()
-        let panel = PopoverView(store: f.store, openSettings: {}).environment(\.colorScheme, .light)
+        let version = AppVersion.display(in: ["Sub2BarVersion": "0.1.0-beta.1", "CFBundleVersion": "12.2.0"])
+        let panel = PopoverView(store: f.store, openSettings: {}, version: version).environment(\.colorScheme, .light)
         let renderer = ImageRenderer(content: panel)
         renderer.scale = 2
         let image = try XCTUnwrap(renderer.cgImage)
@@ -60,6 +61,22 @@ final class AppearanceTests: XCTestCase {
                                        statisticsUsage: original.statisticsUsage)
         let requestCount = f.backend.requests.count
         for scheme in [ColorScheme.light, .dark] {
+            for label in [version, "0.1.0", "开发版"] {
+                let badge = VersionBadge(version: label).environment(\.colorScheme, scheme)
+                let badgeRenderer = ImageRenderer(content: badge)
+                badgeRenderer.scale = 2
+                let badgeImage = try XCTUnwrap(badgeRenderer.cgImage)
+                XCTAssertEqual(badgeImage.height, 36, "Version badge should stay compact")
+                XCTAssertGreaterThan(badgeImage.width, 40)
+                XCTAssertLessThan(badgeImage.width, 200, "Full beta version must fit beside the connection status")
+            }
+            let themedPanel = PopoverView(store: f.store, openSettings: {}, version: version)
+                .environment(\.colorScheme, scheme)
+            let panelRenderer = ImageRenderer(content: themedPanel)
+            panelRenderer.scale = 2
+            let panelImage = try XCTUnwrap(panelRenderer.cgImage)
+            XCTAssertEqual(panelImage.width, 864)
+            XCTAssertEqual(panelImage.height, 1320)
             let icons = HStack(spacing: 20) {
                 ForEach(["openai", "anthropic", "gemini", "antigravity", "unknown"], id: \.self) { platform in
                     VStack(spacing: 12) {
@@ -83,6 +100,8 @@ final class AppearanceTests: XCTestCase {
             if let output = ProcessInfo.processInfo.environment["SUB2BAR_RENDER_DIR"] {
                 let directory = URL(fileURLWithPath: output, isDirectory: true)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let panelData = try XCTUnwrap(NSBitmapImageRep(cgImage: panelImage).representation(using: .png, properties: [:]))
+                try panelData.write(to: directory.appendingPathComponent(scheme == .light ? "version-panel-light.png" : "version-panel-dark.png"))
                 let data = try XCTUnwrap(NSBitmapImageRep(cgImage: cardImage).representation(using: .png, properties: [:]))
                 try data.write(to: directory.appendingPathComponent(scheme == .light ? "countdown-light.png" : "countdown-dark.png"))
                 let iconData = try XCTUnwrap(NSBitmapImageRep(cgImage: iconsImage).representation(using: .png, properties: [:]))

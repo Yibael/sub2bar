@@ -11,6 +11,14 @@ enum Theme {
 struct PopoverView: View {
     @ObservedObject var store: AppStore
     let openSettings: () -> Void
+    let version: String
+
+    init(store: AppStore, openSettings: @escaping () -> Void,
+         version: String = AppVersion.display(in: Bundle.main.infoDictionary)) {
+        self.store = store
+        self.openSettings = openSettings
+        self.version = version
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -183,10 +191,13 @@ struct PopoverView: View {
             Divider()
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 5) {
-                        Image(systemName: store.connectionState.symbol)
-                            .font(.system(size: 9))
-                        Text(store.connectionState.rawValue).font(.system(size: 10))
+                    HStack(spacing: 8) {
+                        HStack(spacing: 5) {
+                            Image(systemName: store.connectionState.symbol)
+                                .font(.system(size: 9))
+                            Text(store.connectionState.rawValue).font(.system(size: 10))
+                        }
+                        VersionBadge(version: version)
                     }
                     if store.isConfigured && !store.needsCredentialAccess {
                         Text(accountSummary)
@@ -226,6 +237,26 @@ struct PopoverView: View {
             Text("0 个账号")
                 .font(.system(size: 11)).foregroundStyle(.secondary).padding(.bottom, 28)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct VersionBadge: View {
+    let version: String
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        Text(version)
+            .font(.system(size: 9, weight: .medium)).monospacedDigit()
+            .foregroundStyle(.secondary).lineLimit(1).fixedSize()
+            .padding(.horizontal, 6).frame(height: 18)
+            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 4))
+            .overlay {
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(Color.primary.opacity(contrast == .increased ? 0.35 : 0.12), lineWidth: 0.5)
+                    .allowsHitTesting(false)
+            }
+            .help("版本 \(version)")
+            .accessibilityLabel("版本 \(version)")
     }
 }
 

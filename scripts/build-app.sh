@@ -16,10 +16,7 @@ case "$BUILD_ARCH" in
 esac
 mkdir -p "$DESTINATION"
 DESTINATION="$(cd "$DESTINATION" && pwd)"
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PROJECT_DIR/Resources/Info.plist")"
-if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "Invalid app version." >&2; exit 1
-fi
+VERSION="$(python3 "$PROJECT_DIR/scripts/version_metadata.py")"
 SCRATCH_DIR="$DESTINATION/build-cache"
 APP_DIR="$DESTINATION/Sub2Bar.app"
 ARCHIVE_NAME="Sub2Bar-${VERSION}-macOS-${BUILD_ARCH}.zip"
@@ -28,7 +25,7 @@ swift build --package-path "$PROJECT_DIR" --scratch-path "$SCRATCH_DIR" -c relea
 BINARY_DIR="$(swift build --package-path "$PROJECT_DIR" --scratch-path "$SCRATCH_DIR" -c release "${ARCH_ARGS[@]}" --show-bin-path)"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BINARY_DIR/Sub2Bar" "$APP_DIR/Contents/MacOS/Sub2Bar"
-cp "$PROJECT_DIR/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
+python3 "$PROJECT_DIR/scripts/version_metadata.py" --write-plist "$APP_DIR/Contents/Info.plist"
 cp "$PROJECT_DIR/THIRD_PARTY_NOTICES.md" "$APP_DIR/Contents/Resources/THIRD_PARTY_NOTICES.md"
 swift "$PROJECT_DIR/scripts/MakeIcon.swift" "$DESTINATION/AppIcon.iconset"
 iconutil -c icns "$DESTINATION/AppIcon.iconset" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
