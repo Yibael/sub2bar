@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-- 后续改动记录在此，发布前移入对应版本。
+- 修复 Intel GitHub runner 的 Metal 渲染测试崩溃：CI 与 Release 仅排除该 runner 上的两项离屏渲染测试，Apple Silicon 和本地保留完整测试。
 
 ## [1.5.0]
 

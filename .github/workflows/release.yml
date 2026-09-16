@@ -51,7 +51,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"
+      - name: Run all tests (Apple Silicon)
+        if: matrix.runner != 'macos-15-intel'
+        run: swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"
+      # Same narrow Metal workaround as CI; Apple Silicon runs both tests.
+      - name: Run tests (Intel, excluding two offscreen render tests)
+        if: matrix.runner == 'macos-15-intel'
+        run: >-
+          swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"
+          --skip '^Sub2BarWindowTests\.AppearanceTests/(testNeutralPanelBackgroundBlocksBlueAndRedInLightAndDark|testSettingsAndPanelCanRenderOffscreen)$'
 
   build:
     name: Build universal release

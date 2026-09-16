@@ -54,8 +54,16 @@ jobs:
         run: |
           xcodebuild -version
           swift --version
-      - name: Run tests
+      - name: Run all tests (Apple Silicon)
+        if: matrix.runner != 'macos-15-intel'
         run: swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"
+      # ImageRenderer aborts inside MTLLoader on the hosted Intel VM.
+      # Exclude only these two render tests; keep all other Intel coverage.
+      - name: Run tests (Intel, excluding two offscreen render tests)
+        if: matrix.runner == 'macos-15-intel'
+        run: >-
+          swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"
+          --skip '^Sub2BarWindowTests\.AppearanceTests/(testNeutralPanelBackgroundBlocksBlueAndRedInLightAndDark|testSettingsAndPanelCanRenderOffscreen)$'
 
   package:
     name: Universal package smoke test
