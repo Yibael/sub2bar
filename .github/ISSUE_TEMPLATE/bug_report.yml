@@ -1,0 +1,34 @@
+name: Bug 报告
+description: 报告可复现的问题；不要填写任何密钥或真实账号凭据。
+body:
+  - type: markdown
+    attributes:
+      value: 请先移除 Admin Key、账号 token、个人域名及日志中的敏感内容。安全漏洞请参考 SECURITY.md。
+  - type: input
+    id: version
+    attributes:
+      label: Sub2Bar / macOS / sub2api 版本
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Mac 架构
+      options: [Apple Silicon, Intel]
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤、预期结果及实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 已脱敏的截图或诊断
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 隐私检查
+      options:
+        - label: 我确认没有附带 Admin Key、账号 token 或其他凭据。
+          required: true

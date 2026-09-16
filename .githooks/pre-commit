@@ -1,0 +1,17 @@
+#!/bin/bash
+set -euo pipefail
+REPOSITORY_ROOT="$(git rev-parse --show-toplevel)"
+python3 "$REPOSITORY_ROOT/scripts/check-repository.py" --staged
+
+# The built-in check always runs. Gitleaks is mandatory in CI and also runs
+# locally when installed by scripts/setup-dev.sh or available on PATH.
+AUDIT_BIN="${SUB2BAR_GITLEAKS:-$REPOSITORY_ROOT/.tools/gitleaks}"
+if [[ ! -x "$AUDIT_BIN" ]] && command -v gitleaks >/dev/null 2>&1; then
+    AUDIT_BIN="$(command -v gitleaks)"
+fi
+if [[ -x "$AUDIT_BIN" ]]; then
+    git -C "$REPOSITORY_ROOT" diff --cached --no-ext-diff --no-color --unified=0 -- . |
+        "$AUDIT_BIN" stdin --redact=100 --no-banner
+else
+    echo "Tip: run bash scripts/setup-dev.sh for local Gitleaks coverage (required in CI)."
+fi

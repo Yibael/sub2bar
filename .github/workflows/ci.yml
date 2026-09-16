@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-checks:
+    name: Repository and secret checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check tracked files and policy tests
+        run: |
+          python3 scripts/check-repository.py
+          python3 -m unittest discover -s scripts/tests -v
+          git diff --check
+      - name: Install checksum-verified audit tools
+        run: bash scripts/install-audit-tools.sh "$RUNNER_TEMP/sub2bar-tools"
+      - name: Scan Git history (redacted)
+        run: '"$RUNNER_TEMP/sub2bar-tools/gitleaks" git --redact=100 --no-banner --log-opts="--all" .'
+      - name: Validate GitHub Actions
+        run: '"$RUNNER_TEMP/sub2bar-tools/actionlint" -color'
+
+  tests:
+    name: Swift tests (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-15-intel]
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Run tests
+        run: swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"
+
+  package:
+    name: Universal package smoke test
+    needs: [repository-checks, tests]
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build universal app (not a release)
+        run: bash scripts/build-app.sh "$RUNNER_TEMP/sub2bar-package" universal

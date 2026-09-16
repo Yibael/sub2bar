@@ -1,0 +1,53 @@
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcresult/
+*.dSYM/
+
+# Generated applications, release archives, local audit tools
+/dist/
+/build/
+/work/
+/.tools/
+*.app/
+*.zip
+*.dmg
+*.pkg
+*.ipa
+*.o
+*.swiftmodule
+*.swiftdoc
+*.sha256
+SHA256SUMS
+__pycache__/
+*.pyc
+
+# Credentials and local environment (examples still undergo secret scanning)
+.env
+.env.*
+!.env.example
+!.env.sample
+credential.json
+credentials.json
+*credentials*.json
+*.local
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.mobileprovision
+id_rsa
+id_ed25519
+
+# Editor / OS files
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*.swo
+*.log

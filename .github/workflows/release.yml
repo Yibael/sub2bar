@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Validate release and scan history
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a versioned commit on master
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/verify-release.py "$RELEASE_TAG"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+          python3 scripts/check-repository.py
+          python3 -m unittest discover -s scripts/tests -v
+      - name: Install audit tools
+        run: bash scripts/install-audit-tools.sh "$RUNNER_TEMP/sub2bar-tools"
+      - name: Scan Git history (redacted)
+        run: '"$RUNNER_TEMP/sub2bar-tools/gitleaks" git --redact=100 --no-banner --log-opts="--all" .'
+      - name: Validate workflows
+        run: '"$RUNNER_TEMP/sub2bar-tools/actionlint" -color'
+
+  test:
+    name: Release tests (${{ matrix.runner }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-15-intel]
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"
+
+  build:
+    name: Build universal release
+    needs: [verify, test]
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Package app and SHA-256
+        run: bash scripts/build-app.sh "$RUNNER_TEMP/sub2bar-release" universal
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: universal-release
+          path: |
+            ${{ runner.temp }}/sub2bar-release/Sub2Bar-*-macOS-universal.zip
+            ${{ runner.temp }}/sub2bar-release/Sub2Bar-*-macOS-universal.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: universal-release
+          path: release-assets
+      - name: Verify packaged checksums
+        working-directory: release-assets
+        run: sha256sum -c ./*.sha256
+      - name: Create draft, then publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" release-assets/*.zip release-assets/*.sha256 \
+            --repo "$GH_REPO" --verify-tag --generate-notes --draft \
+            --title "Sub2Bar $RELEASE_TAG" \
+            --notes "Universal macOS build (Apple Silicon + Intel), macOS 14+. Ad-hoc signed; not Developer ID signed or notarized. Admin Key is stored locally in plaintext with owner-only file permissions. No Admin Key or signing certificate is needed by this workflow."
+          gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false
