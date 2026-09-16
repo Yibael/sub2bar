@@ -123,6 +123,7 @@ struct PopoverView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10).insetSurface(cornerRadius: 8)
             }
+            AccountListSummary(overview: store.accountOverview)
             if store.showsAccountFilters {
                 HStack(spacing: 7) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -190,21 +191,13 @@ struct PopoverView: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 8) {
-                        HStack(spacing: 5) {
-                            Image(systemName: store.connectionState.symbol)
-                                .font(.system(size: 9))
-                            Text(store.connectionState.rawValue).font(.system(size: 10))
-                        }
-                        VersionBadge(version: version)
+                HStack(spacing: 8) {
+                    HStack(spacing: 5) {
+                        Image(systemName: store.connectionState.symbol)
+                            .font(.system(size: 9))
+                        Text(store.connectionState.rawValue).font(.system(size: 10))
                     }
-                    if store.isConfigured && !store.needsCredentialAccess {
-                        Text(accountSummary)
-                            .font(.system(size: 10)).monospacedDigit()
-                            .lineLimit(1).minimumScaleFactor(0.8)
-                            .help(accountSummary)
-                    }
+                    VersionBadge(version: version)
                 }
                 .foregroundStyle(.secondary)
                 .accessibilityElement(children: .combine)
@@ -220,11 +213,6 @@ struct PopoverView: View {
         }
     }
 
-    private var accountSummary: String {
-        "账号 \(store.pinCount) · 可调度 \(store.activeCount)" +
-            (store.warningCount > 0 ? " · 提醒 \(store.warningCount)" : "")
-    }
-
     private var noPins: some View {
         VStack(spacing: 16) {
             Spacer()
@@ -237,6 +225,41 @@ struct PopoverView: View {
             Text("0 个账号")
                 .font(.system(size: 11)).foregroundStyle(.secondary).padding(.bottom, 28)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct AccountListSummary: View {
+    let overview: PinnedAccountOverview
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                title.fixedSize()
+                Spacer(minLength: 0)
+                details.fixedSize()
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                title
+                details
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var title: some View { Text("已 Pin \(overview.total) 个账号") }
+
+    private var details: some View {
+        HStack(spacing: 8) {
+            if !overview.statusText.isEmpty {
+                Text(overview.statusText).fixedSize(horizontal: false, vertical: true)
+            }
+            if overview.attention > 0 {
+                Label("需关注 \(overview.attention)", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.primary).fixedSize()
+                    .help("存在不可调度、额度接近上限或额度读取失败的账号。")
+            }
+        }
     }
 }
 

@@ -26,7 +26,10 @@ final class AppearanceTests: XCTestCase {
     // Offscreen render artifacts use test-only data, never production demo code.
     func testSettingsAndPanelCanRenderOffscreen() async throws {
         let f = try StoreFixture(); defer { f.cleanup() }
+        f.backend.usagePercentage = 98
+        f.backend.concurrency = 3
         await f.open()
+        await f.until { !f.store.showsQuotaLoading }
         let version = AppVersion.display(in: ["Sub2BarVersion": "0.1.0-beta.1", "CFBundleVersion": "12.2.0"])
         let panel = PopoverView(store: f.store, openSettings: {}, version: version).environment(\.colorScheme, .light)
         let renderer = ImageRenderer(content: panel)
@@ -61,6 +64,16 @@ final class AppearanceTests: XCTestCase {
                                        statisticsUsage: original.statisticsUsage)
         let requestCount = f.backend.requests.count
         for scheme in [ColorScheme.light, .dark] {
+            for overview in [f.store.accountOverview,
+                             PinnedAccountOverview(ids: Array(1...1000), snapshots: [], failedIDs: [1]) ] {
+                let summary = AccountListSummary(overview: overview)
+                    .frame(width: 396).environment(\.colorScheme, scheme)
+                let summaryRenderer = ImageRenderer(content: summary)
+                summaryRenderer.scale = 2
+                let summaryImage = try XCTUnwrap(summaryRenderer.cgImage)
+                XCTAssertEqual(summaryImage.width, 792)
+                XCTAssertLessThan(summaryImage.height, 100, "Summary stays lightweight even with unavailable data")
+            }
             for label in [version, "0.1.0", "开发版"] {
                 let badge = VersionBadge(version: label).environment(\.colorScheme, scheme)
                 let badgeRenderer = ImageRenderer(content: badge)
@@ -102,6 +115,22 @@ final class AppearanceTests: XCTestCase {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let panelData = try XCTUnwrap(NSBitmapImageRep(cgImage: panelImage).representation(using: .png, properties: [:]))
                 try panelData.write(to: directory.appendingPathComponent(scheme == .light ? "version-panel-light.png" : "version-panel-dark.png"))
+                // Hosting in an offscreen AppKit window realizes the lazy list;
+                // ImageRenderer alone omits its account cards.
+                let previewWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 432, height: 660),
+                                             styleMask: .borderless, backing: .buffered, defer: false)
+                previewWindow.isReleasedWhenClosed = false
+                let previewHost = NSHostingView(rootView: themedPanel)
+                previewWindow.contentView = previewHost
+                previewHost.frame = NSRect(x: 0, y: 0, width: 432, height: 660)
+                previewHost.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(100))
+                previewHost.layoutSubtreeIfNeeded()
+                let previewBitmap = try XCTUnwrap(previewHost.bitmapImageRepForCachingDisplay(in: previewHost.bounds))
+                previewHost.cacheDisplay(in: previewHost.bounds, to: previewBitmap)
+                let previewData = try XCTUnwrap(previewBitmap.representation(using: .png, properties: [:]))
+                try previewData.write(to: directory.appendingPathComponent(scheme == .light ? "account-overview-light.png" : "account-overview-dark.png"))
+                previewWindow.close()
                 let data = try XCTUnwrap(NSBitmapImageRep(cgImage: cardImage).representation(using: .png, properties: [:]))
                 try data.write(to: directory.appendingPathComponent(scheme == .light ? "countdown-light.png" : "countdown-dark.png"))
                 let iconData = try XCTUnwrap(NSBitmapImageRep(cgImage: iconsImage).representation(using: .png, properties: [:]))

@@ -130,7 +130,10 @@ final class AppStore: ObservableObject {
     var estimatedAccounts: [AccountSnapshot] { snapshots.filter { $0.estimatedWeeklyCost != nil && pinnedAccountErrors[$0.id] == nil } }
     var estimatedTotal: Double? { estimatedAccounts.isEmpty ? nil : estimatedAccounts.compactMap(\.estimatedWeeklyCost).reduce(0, +) }
     var partialErrors: Int { snapshots.filter { $0.usageError != nil }.count + pinnedAccountErrors.count }
-    var warningCount: Int { snapshots.filter { !$0.account.isAvailable || ($0.weeklyPercentage ?? 0) >= 90 || $0.usageError != nil }.count + pinnedAccountErrors.count }
+    var accountOverview: PinnedAccountOverview {
+        PinnedAccountOverview(ids: pinnedIDs, snapshots: snapshots,
+                              failedIDs: Set(pinnedAccountErrors.keys), stale: errorMessage != nil, at: now())
+    }
     func cachedKey(for config: Configuration? = nil) -> String? {
         guard let server = try? (config ?? configuration).baseURL().absoluteString else { return nil }
         return credentials.cachedKey(for: server)
