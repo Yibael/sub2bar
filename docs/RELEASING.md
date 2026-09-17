@@ -6,6 +6,8 @@ Git 只保存源码、测试、资源源文件和工程配置。`.app`、ZIP、�
 
 所有分支示例均以 `master` 为准。Release 工作流接受 `vX.Y.Z`，以及 `vX.Y.Z-alpha.N`、`vX.Y.Z-beta.N`、`vX.Y.Z-rc.N` 标签，并验证标签提交是远端 `master` 的祖先。测试版标记为 Pre-release 且不设置为 Latest；正式版使用 GitHub 默认的 Latest 判定。
 
+Release 标题直接使用版本标签（例如 `v0.1.0-beta.2`），不加 `Sub2Bar` 前缀。安装包仍使用 `Sub2Bar-<版本>-macOS-universal.zip` 命名。
+
 ## 版本来源
 
 - 只在根目录 `VERSION` 维护对外版本，例如 `0.1.0-beta.1`；安装包名称、设置页和发布校验读取同一来源。

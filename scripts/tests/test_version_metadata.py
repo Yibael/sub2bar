@@ -141,6 +141,14 @@ class VersionMetadataTests(unittest.TestCase):
         self.assertEqual(result.stdout.count(b"--prerelease=false\0"), 2)
         self.assertNotIn(b"--latest", result.stdout)
 
+    def test_release_title_is_only_the_version_tag(self):
+        for classification, tag in [("true", "v0.1.0-beta.1"), ("false", "v0.1.0")]:
+            with self.subTest(classification=classification):
+                result = self.run_publish_step(classification)
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                create_args = result.stdout.decode().split("COMMAND\0")[1].split("\0")
+                self.assertEqual(create_args[create_args.index("--title") + 1], tag)
+
     def test_publish_rejects_missing_classification_before_any_gh_command(self):
         result = self.run_publish_step("")
         self.assertNotEqual(result.returncode, 0)

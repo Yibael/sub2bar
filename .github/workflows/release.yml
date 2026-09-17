@@ -122,6 +122,6 @@ jobs:
           gh release create "$RELEASE_TAG" release-assets/*.zip release-assets/*.sha256 \
             --repo "$GH_REPO" --verify-tag --generate-notes --draft \
             "${release_flags[@]}" \
-            --title "Sub2Bar $RELEASE_TAG" \
+            --title "$RELEASE_TAG" \
             --notes "Universal macOS build (Apple Silicon + Intel), macOS 14+. Ad-hoc signed; not Developer ID signed or notarized. Admin Key is stored locally in plaintext with owner-only file permissions. No Admin Key or signing certificate is needed by this workflow."
           gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false "${release_flags[@]}"
