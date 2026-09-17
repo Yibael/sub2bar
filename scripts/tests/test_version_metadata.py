@@ -149,6 +149,16 @@ class VersionMetadataTests(unittest.TestCase):
                 create_args = result.stdout.decode().split("COMMAND\0")[1].split("\0")
                 self.assertEqual(create_args[create_args.index("--title") + 1], tag)
 
+    def test_workflows_run_all_tests_on_apple_silicon_and_keep_universal_build(self):
+        for name in ["ci.yml", "release.yml"]:
+            with self.subTest(workflow=name):
+                workflow = (SCRIPTS.parent / ".github/workflows" / name).read_text()
+                self.assertNotIn("macos-15-intel", workflow)
+                self.assertNotIn("--skip", workflow)
+                self.assertIn("runs-on: macos-26", workflow)
+                self.assertIn('run: swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"', workflow)
+                self.assertRegex(workflow, r"run: bash scripts/build-app\.sh [^\n]+ universal")
+
     def test_publish_rejects_missing_classification_before_any_gh_command(self):
         result = self.run_publish_step("")
         self.assertNotEqual(result.returncode, 0)

@@ -46,7 +46,7 @@ git push origin v0.1.0-beta.1
 
 1. 验证标签、VERSION、Info.plist 模板和 Changelog，确认提交属于 `master`。
 2. 扫描跟踪文件及全部可见 Git 历史；运行策略测试与工作流检查。
-3. 在 Apple Silicon（`macos-26`）及 Intel（`macos-15-intel`）运行 Swift 测试。
+3. 仅在 Apple Silicon（`macos-26`）运行完整 Swift 测试；不启动 Intel 测试任务。
 4. 使用固定 Xcode 26.3 构建通用二进制，验证 `arm64` / `x86_64` 两个 slice、应用签名和 ZIP 校验和。
 5. 只上传 ZIP 和 `.sha256`，不上传测试结果中的私有数据或整个构建目录。
 6. 发布任务先创建并上传完整的 Draft Release，再转为公开 Release；alpha / beta / rc 在创建和公开时都保留 Pre-release 标记并禁止设置为 Latest。仅此任务拥有仓库写权限。

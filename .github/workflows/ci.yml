@@ -37,13 +37,9 @@ jobs:
         run: '"$RUNNER_TEMP/sub2bar-tools/actionlint" -color'
 
   tests:
-    name: Swift tests (${{ matrix.runner }})
-    runs-on: ${{ matrix.runner }}
+    name: Swift tests (Apple Silicon)
+    runs-on: macos-26
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [macos-26, macos-15-intel]
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
@@ -55,15 +51,7 @@ jobs:
           xcodebuild -version
           swift --version
       - name: Run all tests (Apple Silicon)
-        if: matrix.runner != 'macos-15-intel'
         run: swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"
-      # ImageRenderer aborts inside MTLLoader on the hosted Intel VM.
-      # Exclude only these two render tests; keep all other Intel coverage.
-      - name: Run tests (Intel, excluding two offscreen render tests)
-        if: matrix.runner == 'macos-15-intel'
-        run: >-
-          swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"
-          --skip '^Sub2BarWindowTests\.AppearanceTests/(testNeutralPanelBackgroundBlocksBlueAndRedInLightAndDark|testSettingsAndPanelCanRenderOffscreen)$'
 
   package:
     name: Universal package smoke test

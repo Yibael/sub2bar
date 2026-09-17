@@ -170,6 +170,9 @@ final class SubscriptionMonitorTests: XCTestCase {
         f.backend.delayStats = 0.2; f.backend.actualCost = 150
         f.date = f.date.addingTimeInterval(28); f.store.runDueRefreshes()
         await f.until { f.backend.statsCount == 2 }
+        // The same tick starts a runtime request with the old concurrency.
+        // Settle that lane before advancing its completion-based deadline.
+        await f.until { !f.store.isRefreshing }
         f.backend.concurrency = 4
         await f.tick(2)
         XCTAssertEqual(f.store.concurrency, 4)

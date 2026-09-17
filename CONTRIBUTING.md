@@ -16,14 +16,11 @@ python3 -m unittest discover -s scripts/tests -v
 
 初始化只配置当前仓库的 `.githooks` 并将固定版本审计工具下载到被忽略的 `.tools/`，不修改全局 Git 配置或钥匙串。已有其他 hooksPath 时会停止，需先人工合并配置。
 
-## CI 渲染测试范围
+## CI 测试范围
 
-CI 和 Release 在 Apple Silicon runner 上执行完整测试。`macos-15-intel` 的离屏渲染测试曾在 `ImageRenderer` 内触发 Metal 的 `Target device architecture is nil` 断言，因此仅在该 runner 中按完整名称排除以下两项：
+CI 和 Release 仅在 Apple Silicon（`macos-26`）runner 上执行完整 Swift 测试，包括离屏渲染；不再启动 Intel 测试任务，也不按测试名称跳过渲染用例。本地 `swift test` 不受影响。
 
-- `AppearanceTests/testNeutralPanelBackgroundBlocksBlueAndRedInLightAndDark`
-- `AppearanceTests/testSettingsAndPanelCanRenderOffscreen`
-
-Intel 的编译、API、凭据、轮询以及窗口交互测试仍执行；不忽略失败，也不跳过整个窗口测试目标。本地 `swift test` 不受影响，包括 Intel 实机。修改筛选时需同步两个工作流，并确认只排除这两项；云端镜像兼容性恢复后应移除例外。
+通用安装包仍同时编译 `arm64` 和 `x86_64`，并验证两个架构 slice、应用签名和校验和。保留 Intel 分发支持，但不宣称经过 Intel runner 的运行时验证。
 
 ## 提交前
 

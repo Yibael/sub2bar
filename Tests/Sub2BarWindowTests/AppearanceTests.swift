@@ -62,8 +62,7 @@ final class AppearanceTests: XCTestCase {
             XCTAssertEqual(buttonImage.width, 64, "Loading and reload must occupy the same slot")
             XCTAssertEqual(buttonImage.height, 64)
         }
-        // Keep collapsed-card render coverage in this existing Metal test so
-        // the hosted Intel workaround still excludes exactly two tests.
+        // Keep related collapsed-card and panel render coverage together.
         let original = try XCTUnwrap(f.store.snapshots.first)
         let now = Date()
         let formatter = ISO8601DateFormatter()

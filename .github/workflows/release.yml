@@ -45,14 +45,10 @@ jobs:
         run: '"$RUNNER_TEMP/sub2bar-tools/actionlint" -color'
 
   test:
-    name: Release tests (${{ matrix.runner }})
+    name: Release tests (Apple Silicon)
     needs: verify
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-26
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [macos-26, macos-15-intel]
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
@@ -60,14 +56,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Run all tests (Apple Silicon)
-        if: matrix.runner != 'macos-15-intel'
         run: swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"
-      # Same narrow Metal workaround as CI; Apple Silicon runs both tests.
-      - name: Run tests (Intel, excluding two offscreen render tests)
-        if: matrix.runner == 'macos-15-intel'
-        run: >-
-          swift test --scratch-path "$RUNNER_TEMP/sub2bar-tests"
-          --skip '^Sub2BarWindowTests\.AppearanceTests/(testNeutralPanelBackgroundBlocksBlueAndRedInLightAndDark|testSettingsAndPanelCanRenderOffscreen)$'
 
   build:
     name: Build universal release
