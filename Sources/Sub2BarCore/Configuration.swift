@@ -11,17 +11,30 @@ public struct Configuration: Codable, Equatable, Sendable {
     public var refreshInterval: Double
     public var accountRefreshInterval: Double
     public var allowHTTP: Bool
+    public var includeAdminUsage: Bool
+    public var subscriptionTimeZoneID: String
+    public var actualCostCurrency: String
+    public var subscriptionCostCurrency: String
+    private var currencySymbolsVersion = 1
 
     public init(serverURL: String = "", refreshInterval: Double = Configuration.defaultRefreshInterval,
-                allowHTTP: Bool = false, accountRefreshInterval: Double = Configuration.defaultAccountRefreshInterval) {
+                allowHTTP: Bool = false, accountRefreshInterval: Double = Configuration.defaultAccountRefreshInterval,
+                includeAdminUsage: Bool = true, subscriptionTimeZoneID: String = TimeZone.current.identifier,
+                actualCostCurrency: String = "$", subscriptionCostCurrency: String = "$") {
         self.serverURL = serverURL
         self.refreshInterval = refreshInterval
         self.allowHTTP = allowHTTP
         self.accountRefreshInterval = accountRefreshInterval
+        self.includeAdminUsage = includeAdminUsage
+        self.subscriptionTimeZoneID = subscriptionTimeZoneID
+        self.actualCostCurrency = actualCostCurrency
+        self.subscriptionCostCurrency = subscriptionCostCurrency
     }
 
     private enum CodingKeys: String, CodingKey {
-        case serverURL, refreshInterval, accountRefreshInterval, allowHTTP
+        case serverURL, refreshInterval, accountRefreshInterval, allowHTTP, includeAdminUsage, subscriptionTimeZoneID
+        case actualCostCurrency, subscriptionCostCurrency
+        case currencySymbolsVersion
     }
 
     public init(from decoder: Decoder) throws {
@@ -31,6 +44,13 @@ public struct Configuration: Codable, Equatable, Sendable {
         refreshInterval = try values.decodeIfPresent(Double.self, forKey: .refreshInterval) ?? Self.defaultRefreshInterval
         accountRefreshInterval = try values.decodeIfPresent(Double.self, forKey: .accountRefreshInterval) ?? Self.defaultAccountRefreshInterval
         allowHTTP = try values.decodeIfPresent(Bool.self, forKey: .allowHTTP) ?? false
+        includeAdminUsage = try values.decodeIfPresent(Bool.self, forKey: .includeAdminUsage) ?? true
+        subscriptionTimeZoneID = try values.decodeIfPresent(String.self, forKey: .subscriptionTimeZoneID) ?? TimeZone.current.identifier
+        let actualSymbol = try values.decodeIfPresent(String.self, forKey: .actualCostCurrency) ?? "$"
+        let costSymbol = try values.decodeIfPresent(String.self, forKey: .subscriptionCostCurrency) ?? "$"
+        let usesLiteralSymbols = try values.decodeIfPresent(Int.self, forKey: .currencySymbolsVersion) != nil
+        actualCostCurrency = usesLiteralSymbols ? actualSymbol : CurrencyUnit.migrateLegacy(actualSymbol)
+        subscriptionCostCurrency = usesLiteralSymbols ? costSymbol : CurrencyUnit.migrateLegacy(costSymbol)
     }
 
     public var effectiveAccountRefreshInterval: Double {

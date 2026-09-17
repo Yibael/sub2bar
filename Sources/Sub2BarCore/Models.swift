@@ -31,6 +31,7 @@ public struct Account: Decodable, Identifiable, Sendable {
     }
     public var isAvailable: Bool { stateLabel(at: Date()) == "可调度" }
     public var supportsPassiveUsage: Bool { platform == "anthropic" && ["oauth", "setup-token"].contains(type ?? "") }
+    public var supportsSubscription: Bool { type == "oauth" }
     public func stateLabel(at now: Date) -> String {
         if status == "error" { return "错误" }
         if status == "inactive" || status == "disabled" { return "已停用" }

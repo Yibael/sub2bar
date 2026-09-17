@@ -36,6 +36,19 @@ final class MockBackend: @unchecked Sendable {
     private var _percentage = 40.0
     private var _usagePercentage = 50.0
     private var _usageCost = 25.0
+    private var _todayCost = 12.0
+    private var _todayError = 0
+    private var _missingTodayIDs: Set<Int> = []
+    private var _delayToday = 0.0
+    private var todayBatches: [[Int]] = []
+    private var _actualCost = 100.0
+    private var _adminCost = 20.0
+    private var _statsError = 0
+    private var _usersError = 0
+    private var _failedStatsIDs: Set<Int> = []
+    private var _delayStats = 0.0
+    private var _delayAccounts = 0.0
+    private var _directoryIDs = [1]
     private var _batchUnavailable = false
     private var batches: [[Int]] = []
     private var _status = "active"
@@ -50,6 +63,23 @@ final class MockBackend: @unchecked Sendable {
     var percentage: Double { get { lock.withLock { _percentage } } set { lock.withLock { _percentage = newValue } } }
     var usagePercentage: Double { get { lock.withLock { _usagePercentage } } set { lock.withLock { _usagePercentage = newValue } } }
     var usageCost: Double { get { lock.withLock { _usageCost } } set { lock.withLock { _usageCost = newValue } } }
+    var todayCost: Double { get { lock.withLock { _todayCost } } set { lock.withLock { _todayCost = newValue } } }
+    var todayError: Int { get { lock.withLock { _todayError } } set { lock.withLock { _todayError = newValue } } }
+    var missingTodayIDs: Set<Int> { get { lock.withLock { _missingTodayIDs } } set { lock.withLock { _missingTodayIDs = newValue } } }
+    var delayToday: Double { get { lock.withLock { _delayToday } } set { lock.withLock { _delayToday = newValue } } }
+    var todayBatchIDs: [[Int]] { lock.withLock { todayBatches } }
+    var todayCount: Int { requests.filter { $0.hasSuffix("/today-stats/batch") }.count }
+    var actualCost: Double { get { lock.withLock { _actualCost } } set { lock.withLock { _actualCost = newValue } } }
+    var adminCost: Double { get { lock.withLock { _adminCost } } set { lock.withLock { _adminCost = newValue } } }
+    var statsError: Int { get { lock.withLock { _statsError } } set { lock.withLock { _statsError = newValue } } }
+    var usersError: Int { get { lock.withLock { _usersError } } set { lock.withLock { _usersError = newValue } } }
+    var failedStatsIDs: Set<Int> { get { lock.withLock { _failedStatsIDs } } set { lock.withLock { _failedStatsIDs = newValue } } }
+    var delayStats: Double { get { lock.withLock { _delayStats } } set { lock.withLock { _delayStats = newValue } } }
+    var statsCount: Int { requests.filter { $0.contains("/usage/stats?") }.count }
+    var usersCount: Int { requests.filter { $0.contains("/users?") }.count }
+    var directoryCount: Int { requests.filter { $0.contains("/accounts?") }.count }
+    var delayAccounts: Double { get { lock.withLock { _delayAccounts } } set { lock.withLock { _delayAccounts = newValue } } }
+    var directoryIDs: [Int] { get { lock.withLock { _directoryIDs } } set { lock.withLock { _directoryIDs = newValue } } }
     var batchUnavailable: Bool { get { lock.withLock { _batchUnavailable } } set { lock.withLock { _batchUnavailable = newValue } } }
     var batchIDs: [[Int]] { lock.withLock { batches } }
     var batchCount: Int { requests.filter { $0.hasSuffix("/usage/batch") }.count }
@@ -64,17 +94,45 @@ final class MockBackend: @unchecked Sendable {
     var requests: [String] { lock.withLock { paths } }
     var activeCount: Int { requests.filter { $0.contains("source=active") }.count }
     var passiveCount: Int { requests.filter { $0.contains("source=passive") }.count }
-    var detailCount: Int { requests.filter { !$0.contains("usage") && !$0.contains("?") }.count }
+    var detailCount: Int { requests.filter { !$0.contains("usage") && !$0.contains("today-stats") && !$0.contains("?") }.count }
 
     func response(_ request: URLRequest) -> (Int, String, Double) {
         lock.withLock {
             let url = request.url!
             paths.append(url.path + (url.query.map { "?" + $0 } ?? ""))
             let isBatch = url.path.hasSuffix("/usage/batch")
-            XCTAssertEqual(request.httpMethod, isBatch ? "POST" : "GET")
+            let isTodayBatch = url.path.hasSuffix("/today-stats/batch")
+            XCTAssertEqual(request.httpMethod, isBatch || isTodayBatch ? "POST" : "GET")
             XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "fake-secret")
             XCTAssertFalse(url.absoluteString.contains("force=true"))
             if _error > 0 { return (_error, "private-secret-error", 0) }
+            if url.path.hasSuffix("/users") {
+                if _usersError > 0 { return (_usersError, "private-secret-error", 0) }
+                return (200, #"{"code":0,"data":{"items":[{"id":9,"role":"admin"}],"total":1}}"#, 0)
+            }
+            if url.path.hasSuffix("/usage/stats") {
+                let query = Dictionary(uniqueKeysWithValues: (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+                XCTAssertEqual(query["nocache"], "true")
+                XCTAssertNotNil(query["timezone"])
+                let id = Int(query["account_id"] ?? "") ?? 0
+                if _statsError > 0 { return (_statsError, "private-secret-error", _delayStats) }
+                if _failedStatsIDs.contains(id) { return (503, "private-secret-error", _delayStats) }
+                let cost = query["user_id"] == nil ? _actualCost : _adminCost
+                return (200, "{\"code\":0,\"data\":{\"total_actual_cost\":\(cost),\"total_cost\":999}}", _delayStats)
+            }
+            if isTodayBatch {
+                let body = (try? JSONSerialization.jsonObject(with: testRequestBody(request))) as? [String: Any]
+                let ids = body?["account_ids"] as? [Int] ?? []
+                XCTAssertFalse(ids.isEmpty)
+                XCTAssertNil(body?["force"])
+                todayBatches.append(ids)
+                if _todayError > 0 { return (_todayError, "private-secret-error", _delayToday) }
+                let values = Dictionary(uniqueKeysWithValues: ids.filter { !_missingTodayIDs.contains($0) }.map {
+                    (String($0), ["standard_cost": _todayCost, "cost": 98.0, "user_cost": 76.0])
+                })
+                let data = try! JSONSerialization.data(withJSONObject: ["code": 0, "data": ["stats": values]])
+                return (200, String(decoding: data, as: UTF8.self), _delayToday)
+            }
             let usage: [String: Any] = ["updated_at": "2026-09-15T10:00:00Z", "five_hour": ["utilization": 20],
                                        "seven_day": ["utilization": _usagePercentage, "window_stats": ["cost": _usageCost]]]
             if isBatch {
@@ -99,7 +157,12 @@ final class MockBackend: @unchecked Sendable {
             }
             let id = Int(url.lastPathComponent) ?? 1
             let item = "{\"id\":\(id),\"name\":\"Account \(id)\",\"platform\":\"\(_platform)\",\"type\":\"oauth\",\"status\":\"\(_status)\",\"schedulable\":true,\"concurrency\":5,\"current_concurrency\":\(_concurrency),\"extra\":{\"codex_5h_used_percent\":10,\"codex_7d_used_percent\":\(_percentage),\"codex_usage_updated_at\":\"2026-09-15T10:00:00Z\",\"codex_7d_reset_at\":\"2026-09-20T10:00:00Z\"}}"
-            if url.path.hasSuffix("/accounts") { return (200, "{\"code\":0,\"data\":{\"items\":[\(item)],\"total\":1}}", 0) }
+            if url.path.hasSuffix("/accounts") {
+                let items: [[String: Any]] = _directoryIDs.map { ["id": $0, "name": "Account \($0)", "platform": _platform,
+                    "type": "oauth", "status": _status, "schedulable": true, "concurrency": 5, "current_concurrency": _concurrency] }
+                let data = try! JSONSerialization.data(withJSONObject: ["code": 0, "data": ["items": items, "total": items.count]])
+                return (200, String(decoding: data, as: UTF8.self), _delayAccounts)
+            }
             return (200, "{\"code\":0,\"data\":\(item)}", _delayRuntime)
         }
     }

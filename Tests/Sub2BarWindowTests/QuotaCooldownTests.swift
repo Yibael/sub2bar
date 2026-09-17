@@ -4,6 +4,111 @@ import Sub2BarCore
 
 @MainActor
 final class QuotaCooldownTests: XCTestCase {
+    func testManualClickImmediatelyRefreshesBeforeDeadlineAndRestartsCountdown() async throws {
+        let f = try StoreFixture(interval: 30); defer { f.cleanup() }
+        await f.open()
+        await f.until { !f.store.showsQuotaLoading }
+        await f.tick(15)
+        XCTAssertEqual(f.store.secondsUntilRefresh(at: f.date), 15)
+        f.backend.usageCost = 42; f.backend.usagePercentage = 84; f.backend.delayActive = 0.1
+        f.store.refreshManually()
+        XCTAssertTrue(f.store.isRefreshingQuota)
+        XCTAssertTrue(f.store.showsQuotaLoading)
+        XCTAssertNil(f.store.secondsUntilRefresh(at: f.date))
+        await f.until { !f.store.isRefreshing && !f.store.isRefreshingQuota }
+        XCTAssertEqual(f.backend.batchCount, 2)
+        XCTAssertEqual(f.store.snapshots.first?.weeklyCost, 42)
+        XCTAssertEqual(f.store.snapshots.first?.weeklyPercentage, 84)
+        XCTAssertEqual(f.store.secondsUntilRefresh(at: f.date), 30)
+        XCTAssertEqual(f.store.nextRefreshAt, f.date.addingTimeInterval(30))
+        await f.tick(15)
+        XCTAssertEqual(f.backend.batchCount, 2, "The old deadline must not trigger a second request")
+        await f.tick(15)
+        XCTAssertEqual(f.backend.batchCount, 3)
+    }
+
+    func testManualClickIncludesAllKnownPinsEvenDuringFailureBackoff() async throws {
+        let f = try StoreFixture(ids: [7, 2], interval: 30); defer { f.cleanup() }
+        f.backend.failedUsageIDs = [2]
+        await f.open()
+        f.backend.failedUsageIDs = []
+        await f.tick(1)
+        f.store.refreshManually()
+        await f.until { !f.store.isRefreshing && !f.store.isRefreshingQuota }
+        XCTAssertEqual(f.backend.batchIDs, [[7, 2], [7, 2]])
+        XCTAssertTrue(f.store.snapshots.allSatisfy { $0.usageError == nil })
+        XCTAssertEqual(f.store.secondsUntilRefresh(at: f.date), 30)
+        XCTAssertEqual(f.backend.activeCount, 0)
+    }
+
+    func testManualClickUsesLegacyNormalQueryWithoutRepeatingUnsupportedBatch() async throws {
+        for platform in ["openai", "anthropic"] {
+            let f = try StoreFixture(interval: 30); defer { f.cleanup() }
+            f.backend.platform = platform; f.backend.batchUnavailable = true
+            await f.open()
+            f.store.refreshManually()
+            await f.until { !f.store.isRefreshing && !f.store.isRefreshingQuota }
+            XCTAssertEqual(f.backend.batchCount, 1)
+            XCTAssertEqual(f.backend.activeCount, platform == "openai" ? 2 : 0)
+            XCTAssertEqual(f.backend.passiveCount, platform == "anthropic" ? 2 : 0)
+            XCTAssertEqual(f.store.secondsUntilRefresh(at: f.date), 30)
+        }
+    }
+
+    func testManualClickWhileDetailsLoadRemembersIntentWithoutDuplicatingQuota() async throws {
+        let f = try StoreFixture(interval: 30); defer { f.cleanup() }
+        await f.open()
+        // Remove only cached payloads while preserving this server's cooldown.
+        f.store.setPanelVisible(false)
+        f.store.setPinned(false, id: 1); f.store.setPinned(true, id: 1)
+        f.backend.delayRuntime = 0.1
+        f.store.setPanelVisible(true)
+        await f.until { f.backend.detailCount == 2 }
+        f.store.refreshManually(); f.store.refreshManually()
+        await f.until { !f.store.isRefreshing && !f.store.isRefreshingQuota }
+        XCTAssertEqual(f.backend.batchCount, 2, "Explicit click bypasses the retained cooldown after details arrive")
+        await f.tick(1)
+        XCTAssertEqual(f.backend.batchCount, 2, "Repeated clicks while loading collapse into one request")
+    }
+
+    func testClosingDiscardsPendingManualIntent() async throws {
+        let f = try StoreFixture(interval: 30); defer { f.cleanup() }
+        await f.open()
+        f.store.setPanelVisible(false)
+        f.store.setPinned(false, id: 1); f.store.setPinned(true, id: 1)
+        f.backend.delayRuntime = 0.1
+        f.store.setPanelVisible(true)
+        await f.until { f.backend.detailCount == 2 }
+        f.store.refreshManually()
+        f.store.setPanelVisible(false)
+        f.backend.delayRuntime = 0
+        await f.open()
+        XCTAssertEqual(f.backend.batchCount, 1, "Reopening must not replay a cancelled click")
+    }
+
+    func testManualClickDoesNothingWhenHiddenSleepingOrUnpinned() async throws {
+        let f = try StoreFixture(interval: 30); defer { f.cleanup() }
+        await f.open()
+        f.store.setPanelVisible(false)
+        let count = f.backend.requests.count
+        f.store.refreshManually()
+        await f.tick(1)
+        XCTAssertEqual(f.backend.requests.count, count)
+        await f.open()
+        f.store.suspendForSleep()
+        let sleepingCount = f.backend.requests.count
+        f.store.refreshManually()
+        await f.tick(1)
+        XCTAssertEqual(f.backend.requests.count, sleepingCount)
+        f.store.setPanelVisible(false)
+        f.store.setPinned(false, id: 1)
+        f.store.resumeAfterSleep()
+        f.store.setPanelVisible(true)
+        f.store.refreshManually()
+        await f.tick(1)
+        XCTAssertEqual(f.backend.requests.count, sleepingCount)
+    }
+
     func testReopenedPanelAutomaticallyWakesAtRetainedDeadline() async throws {
         let f = try StoreFixture(automatic: true); defer { f.cleanup() }
         await f.open()
@@ -38,7 +143,7 @@ final class QuotaCooldownTests: XCTestCase {
         XCTAssertEqual(f.backend.batchCount, 1)
     }
 
-    func testReopenAndManualRefreshPreserveRemainingInterval() async throws {
+    func testReopenAndAutomaticRefreshPreserveRemainingInterval() async throws {
         let f = try StoreFixture(interval: 30); defer { f.cleanup() }
         await f.open()
         let deadline = f.store.nextRefreshAt

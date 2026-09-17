@@ -18,6 +18,14 @@ public struct PinnedAccountSelection: Codable, Sendable {
         } else { ids.removeAll { $0 == id } }
         servers[server] = ids
     }
+
+    public mutating func move(id: Int, to destination: Int, server: String) {
+        var ordered = ids(for: server)
+        guard let source = ordered.firstIndex(of: id), ordered.indices.contains(destination), source != destination else { return }
+        ordered.remove(at: source)
+        ordered.insert(id, at: destination)
+        servers[server] = ordered
+    }
 }
 
 public struct PinnedSnapshotResult: Sendable {

@@ -49,7 +49,7 @@ python3 scripts/check-repository.py --tree
 - 使用 Conventional Commits，例如 `feat: add account filtering`、`fix: preserve refresh budget`、`docs: clarify credential storage`。
 - Swift 使用 4 空格，YAML 使用 2 空格；保持文件末尾换行。遵循 `.editorconfig`。
 - 修复需附回归测试；请求调度、认证、文件权限及重定向相关变化必须覆盖失败路径。
-- 不让 UI 重绘、打开设置、保存设置触发隐式网络查询。面板关闭必须停止轮询。
+- 不让 UI 重绘或保存设置触发隐式网络查询。进入账号管理可以按明确的 60 秒缓存策略加载目录，手动刷新可绕过期限；其他设置页不自动查询，目录不持续轮询。面板关闭必须停止监控轮询。
 - 改动 sub2api 接口前核查官方源码，更新 `docs/API-AUDIT.md`，尤其关注是否会访问 OpenAI。
 - 只读字段未知时显示未知，不伪造零并发/零额度。
 - 新增依赖前讨论必要性；出现 `Package.resolved` 后将其纳入版本控制。

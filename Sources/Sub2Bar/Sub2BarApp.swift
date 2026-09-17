@@ -36,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         popover.behavior = .transient
         popover.delegate = self
-        popover.contentSize = NSSize(width: 432, height: 660)
+        popover.contentSize = NSSize(width: PanelSizing.width, height: PanelSizing.initialHeight)
         popover.contentViewController = NSHostingController(rootView: panelView())
         observation = store.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.updateTooltip() }
@@ -108,7 +108,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func panelView() -> PopoverView {
-        PopoverView(store: store, openSettings: { [weak self] in self?.showSettings() })
+        PopoverView(store: store, openSettings: { [weak self] in self?.showSettings() },
+                    onHeightChange: { [weak self] height in
+            // Update AppKit only for real geometry changes, never on every poll.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, abs(self.popover.contentSize.height - height) >= 1 else { return }
+                self.popover.contentSize = NSSize(width: PanelSizing.width, height: height)
+            }
+        })
     }
 
     @objc private func wokeUp() { store.resumeAfterSleep() }

@@ -346,10 +346,10 @@ final class MonitorTests: XCTestCase {
         await f.open()
         f.backend.delayActive = 0.2
         f.date = f.date.addingTimeInterval(5)
-        f.store.refresh()
+        f.store.refreshManually()
         await f.until { f.backend.batchCount == 2 }
         for _ in 0..<4 {
-            f.store.refresh()
+            f.store.refreshManually()
         }
         await f.until { !f.store.isRefreshing && !f.store.isRefreshingQuota }
         XCTAssertEqual(f.backend.batchCount, 2)

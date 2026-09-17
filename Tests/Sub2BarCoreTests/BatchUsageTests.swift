@@ -97,4 +97,61 @@ final class BatchUsageTests: XCTestCase {
         do { _ = try await client().loadUsageBatch(ids: [1]); XCTFail("Expected auth error") }
         catch { XCTAssertEqual(error as? APIError, .http(401)) }
     }
+
+    func testTodayBatchUsesOnlyStandardCostAndSelectedIDs() async throws {
+        BatchUsageProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/api/v1/admin/accounts/today-stats/batch")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "test-admin-key")
+            let payload = try self.body(request)
+            XCTAssertEqual(payload["account_ids"] as? [Int], [7, 2])
+            XCTAssertEqual(payload.count, 1)
+            return (200, #"{"code":0,"data":{"stats":{"7":{"standard_cost":12.34,"cost":99,"user_cost":88},"2":{"standard_cost":0},"999":{"standard_cost":100}}}}"#)
+        }
+        let costs = try await client().loadTodayUsageBatch(ids: [7, 2, 7, 0, -1])
+        XCTAssertEqual(costs, [7: 12.34, 2: 0])
+    }
+
+    func testTodayBatchDoesNotTurnMissingOrInvalidStandardCostsIntoZero() async throws {
+        BatchUsageProtocol.handler = { _ in
+            (200, #"{"code":0,"data":{"stats":{"1":{"cost":30,"user_cost":20},"2":{"standard_cost":null},"3":{"standard_cost":-1},"4":{"standard_cost":0}}}}"#)
+        }
+        let costs = try await client().loadTodayUsageBatch(ids: [1, 2, 3, 4, 5])
+        XCTAssertEqual(costs, [4: 0])
+    }
+
+    func testTodayBatchWithNoIDsMakesNoRequest() async throws {
+        BatchUsageProtocol.handler = { _ in XCTFail("No request expected"); return (500, "") }
+        let costs = try await client().loadTodayUsageBatch(ids: [0, -1])
+        XCTAssertTrue(costs.isEmpty)
+    }
+
+    func testTodayBatchesAreBoundedAndNeverUseQuotaRoutes() async throws {
+        var sizes: [Int] = []
+        BatchUsageProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/admin/accounts/today-stats/batch")
+            let ids = try XCTUnwrap(self.body(request)["account_ids"] as? [Int])
+            sizes.append(ids.count)
+            let values = Dictionary(uniqueKeysWithValues: ids.map { (String($0), ["standard_cost": 1]) })
+            let data = try JSONSerialization.data(withJSONObject: ["code": 0, "data": ["stats": values]])
+            return (200, String(decoding: data, as: UTF8.self))
+        }
+        let costs = try await client().loadTodayUsageBatch(ids: Array(1...205) + [1])
+        XCTAssertEqual(sizes, [100, 100, 5])
+        XCTAssertEqual(costs.count, 205)
+    }
+
+    func testTodayBatchErrorsDoNotFallbackToUpstreamAwareRoutes() async {
+        for status in [401, 403, 404, 405, 503] {
+            var count = 0
+            BatchUsageProtocol.handler = { request in
+                count += 1
+                XCTAssertEqual(request.url?.path, "/api/v1/admin/accounts/today-stats/batch")
+                return (status, "private-secret-error")
+            }
+            do { _ = try await client().loadTodayUsageBatch(ids: [1]); XCTFail("Expected error") }
+            catch { XCTAssertEqual(error as? APIError, .http(status)) }
+            XCTAssertEqual(count, 1)
+        }
+    }
 }

@@ -25,7 +25,15 @@ final class AppStore: ObservableObject {
     @Published private(set) var configuration: Configuration
     @Published private(set) var snapshots: [AccountSnapshot] = []
     @Published private(set) var pinnedIDs: [Int] = []
+    @Published private(set) var selectedPinnedID: Int?
     @Published private(set) var pinnedAccountErrors: [Int: String] = [:]
+    @Published private(set) var todayUsage: [Int: Double] = [:]
+    @Published private(set) var todayUsageErrors: [Int: String] = [:]
+    @Published private(set) var subscriptions: [Int: AccountSubscription] = [:]
+    @Published private(set) var subscriptionUsage: [Int: SubscriptionUsageSample] = [:]
+    @Published private(set) var subscriptionErrors: [Int: String] = [:]
+    @Published private(set) var isRefreshingSubscriptions = false
+    @Published private(set) var nextSubscriptionAt: Date?
     @Published private(set) var availableAccounts: [Account] = []
     @Published private(set) var isLoadingAccounts = false
     @Published private(set) var hasLoadedAccounts = false
@@ -53,8 +61,14 @@ final class AppStore: ObservableObject {
     private let now: () -> Date
     private let automaticallySchedule: Bool
     private var pinSelection: PinnedAccountSelection
+    private var subscriptionPreferences: SubscriptionPreferences
+    private var subscriptionTask: Task<Void, Never>?
+    private var subscriptionGeneration = UUID()
+    private var subscriptionFailures = 0
+    private static let subscriptionInterval: Double = 30
     private var latestAccounts: [Int: Account] = [:]
     private var batchUsageSupported = true
+    private var manualQuotaRefreshPending = false
     private var runtimeTask: Task<Void, Never>?
     private var quotaTask: Task<Void, Never>?
     private var quotaLoadingTask: Task<Void, Never>?
@@ -82,6 +96,8 @@ final class AppStore: ObservableObject {
     private var quotaTimings: [QuotaKey: QuotaTiming] = [:]
     private let defaultsKey = "sub2bar.configuration.v1"
     private let pinsKey = "sub2bar.pins.v1"
+    private let subscriptionsKey = "sub2bar.subscriptions.v1"
+    private static let accountsCacheLifetime: TimeInterval = 60
 
     init(defaults: UserDefaults = .standard, credentials: CredentialSession? = nil,
          now: @escaping () -> Date = Date.init, automaticallySchedule: Bool = true,
@@ -90,11 +106,32 @@ final class AppStore: ObservableObject {
         self.clientFactory = clientFactory; self.now = now; self.automaticallySchedule = automaticallySchedule
         configuration = defaults.data(forKey: defaultsKey).flatMap { try? JSONDecoder().decode(Configuration.self, from: $0) } ?? Configuration()
         pinSelection = defaults.data(forKey: pinsKey).flatMap { try? JSONDecoder().decode(PinnedAccountSelection.self, from: $0) } ?? PinnedAccountSelection()
+        subscriptionPreferences = defaults.data(forKey: subscriptionsKey)
+            .flatMap { try? JSONDecoder().decode(SubscriptionPreferences.self, from: $0) } ?? SubscriptionPreferences()
         restorePins()
+        restoreSubscriptions()
     }
     var isConfigured: Bool { !configuration.serverURL.isEmpty }
     var hostLabel: String { (try? configuration.baseURL().host) ?? "未配置服务器" }
     var pinCount: Int { pinnedIDs.count }
+    var selectedPinnedIndex: Int? { selectedPinnedID.flatMap { pinnedIDs.firstIndex(of: $0) } }
+    var selectedPinnedSnapshot: AccountSnapshot? { snapshots.first { $0.id == selectedPinnedID } }
+    // Changes only when the saved connection/authentication scope changes.
+    var accountDirectoryIdentity: UUID { accountsGeneration }
+    var hasFreshAccountDirectory: Bool {
+        guard hasLoadedAccounts, let accountsUpdatedAt else { return false }
+        let age = now().timeIntervalSince(accountsUpdatedAt)
+        return age >= 0 && age < Self.accountsCacheLifetime
+    }
+    var orderedAvailableAccounts: [Account] {
+        let positions = Dictionary(uniqueKeysWithValues: pinnedIDs.enumerated().map { ($0.element, $0.offset) })
+        return availableAccounts.sorted {
+            let left = positions[$0.id] ?? Int.max, right = positions[$1.id] ?? Int.max
+            if left != right { return left < right }
+            let order = $0.name.localizedStandardCompare($1.name)
+            return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+        }
+    }
     var showsAccountFilters: Bool { pinCount > 5 }
     var needsCredentialAccess: Bool { isConfigured && cachedKey() == nil }
     var isPolling: Bool { pollTask != nil }
@@ -134,6 +171,55 @@ final class AppStore: ObservableObject {
         PinnedAccountOverview(ids: pinnedIDs, snapshots: snapshots,
                               failedIDs: Set(pinnedAccountErrors.keys), stale: errorMessage != nil, at: now())
     }
+    var eligibleSubscriptionIDs: [Int] {
+        pinnedIDs.filter { id in
+            guard subscriptions[id]?.isComplete == true else { return false }
+            // Saved metadata was validated as OAuth. Unknown/failed accounts
+            // remain in the denominator until their type can be confirmed.
+            let account = latestAccounts[id] ?? snapshots.first { $0.id == id }?.account ?? availableAccounts.first { $0.id == id }
+            return account?.supportsSubscription ?? true
+        }
+    }
+    var totalSubscriptionCost: Decimal? {
+        guard !eligibleSubscriptionIDs.isEmpty else { return nil }
+        return eligibleSubscriptionIDs.compactMap { subscriptions[$0]?.monthlyPrice }.reduce(0, +)
+    }
+    var totalSubscriptionActualCost: Decimal? {
+        let ids = eligibleSubscriptionIDs
+        guard !ids.isEmpty else { return nil }
+        let costs = ids.compactMap { subscriptionSample(for: $0)?.actualCost }
+        guard costs.count == ids.count else { return nil }
+        return costs.reduce(0, +)
+    }
+    func subscriptionCycle(for id: Int) -> SubscriptionCycle? {
+        guard let value = subscriptions[id], value.isComplete, let day = value.renewalDay else { return nil }
+        return SubscriptionCycle(renewalDay: day, at: now(), timeZoneID: configuration.subscriptionTimeZoneID)
+    }
+    func subscriptionSample(for id: Int) -> SubscriptionUsageSample? {
+        guard eligibleSubscriptionIDs.contains(id), pinnedAccountErrors[id] == nil,
+              subscriptionErrors[id] == nil, let sample = subscriptionUsage[id],
+              sample.cycle == subscriptionCycle(for: id), sample.includesAdmin == configuration.includeAdminUsage else { return nil }
+        return sample
+    }
+    private func restoreSubscriptions() {
+        subscriptions = (try? configuration.baseURL().absoluteString)
+            .map { subscriptionPreferences.subscriptions(for: $0) } ?? [:]
+    }
+    func saveSubscription(_ value: AccountSubscription?, for account: Account) throws {
+        guard account.supportsSubscription else { throw SubscriptionError.unsupportedAccount }
+        if let price = value?.monthlyPrice, price.isNaN || price < 0 { throw SubscriptionError.invalidConfiguration }
+        if let day = value?.renewalDay, !(1...31).contains(day) { throw SubscriptionError.invalidConfiguration }
+        let server = try configuration.baseURL().absoluteString
+        var saved = subscriptionPreferences
+        saved.set(value, id: account.id, server: server)
+        let data = try JSONEncoder().encode(saved)
+        defaults.set(data, forKey: subscriptionsKey)
+        subscriptionPreferences = saved; restoreSubscriptions()
+        cancelSubscriptionPolling()
+        subscriptionUsage[account.id] = nil; subscriptionErrors[account.id] = nil
+        nextSubscriptionAt = now(); subscriptionFailures = 0
+        if canPoll { runDueRefreshes() }
+    }
     func cachedKey(for config: Configuration? = nil) -> String? {
         guard let server = try? (config ?? configuration).baseURL().absoluteString else { return nil }
         return credentials.cachedKey(for: server)
@@ -161,32 +247,53 @@ final class AppStore: ObservableObject {
     func save(_ draft: Configuration, key: String) async throws {
         guard !isSaving, !isLoadingCredential else { throw CredentialSessionError.busy }
         let base = try draft.baseURL()
+        guard TimeZone(identifier: draft.subscriptionTimeZoneID) != nil else { throw SubscriptionError.invalidConfiguration }
         let sameConnection = (try? configuration.baseURL().absoluteString) == base.absoluteString &&
             cachedKey() == key.trimmingCharacters(in: .whitespacesAndNewlines)
-        let wasPolling = canPoll
-        isSaving = true
-        defer { isSaving = false; credentialRevision += 1; updateQuotaDeadline(); scheduleWake() }
         var saved = draft
+        saved.actualCostCurrency = try CurrencyUnit.normalized(draft.actualCostCurrency)
+        saved.subscriptionCostCurrency = try CurrencyUnit.normalized(draft.subscriptionCostCurrency)
         saved.serverURL = base.absoluteString; saved.refreshInterval = draft.effectiveRefreshInterval
         saved.accountRefreshInterval = draft.effectiveAccountRefreshInterval
         let data = try JSONEncoder().encode(saved)
+        if sameConnection {
+            var displayOnly = configuration
+            displayOnly.actualCostCurrency = saved.actualCostCurrency
+            displayOnly.subscriptionCostCurrency = saved.subscriptionCostCurrency
+            if displayOnly == saved {
+                // Units are display labels, not a data/statistics scope change.
+                // Keep amounts, in-flight requests and all polling deadlines.
+                configuration = saved; defaults.set(data, forKey: defaultsKey)
+                return
+            }
+        }
+        let wasPolling = canPoll
+        isSaving = true
+        defer { isSaving = false; credentialRevision += 1; updateQuotaDeadline(); scheduleWake() }
         try await credentials.save(key, for: base.absoluteString)
         if sameConnection {
-            guard saved != configuration else { return }
+            let statisticsChanged = saved.includeAdminUsage != configuration.includeAdminUsage ||
+                saved.subscriptionTimeZoneID != configuration.subscriptionTimeZoneID
             // Timing-only changes keep snapshots, full statistics, pins and the
             // account directory. Save never dispatches a connection request.
             cancelPolling()
             configuration = saved; defaults.set(data, forKey: defaultsKey)
+            if statisticsChanged { subscriptionUsage = [:]; subscriptionErrors = [:]; subscriptionFailures = 0 }
             if wasPolling {
                 nextRuntimeAt = now().addingTimeInterval(runtimeDelay)
+                nextSubscriptionAt = now()
             }
             return
         }
         resetAllRequests()
         configuration = saved; defaults.set(data, forKey: defaultsKey)
         credentialAttemptedServer = base.absoluteString; credentialError = nil
+        selectedPinnedID = nil
         restorePins()
+        restoreSubscriptions()
+        subscriptionUsage = [:]; subscriptionErrors = [:]; subscriptionFailures = 0
         snapshots = []; latestAccounts = [:]; pinnedAccountErrors = [:]
+        todayUsage = [:]; todayUsageErrors = [:]
         availableAccounts = []; hasLoadedAccounts = false; accountsError = nil; accountsUpdatedAt = nil
         lastUpdated = nil; quotaUpdatedAt = nil; statusUpdatedAt = nil; errorMessage = nil
         platform = "全部"; search = ""
@@ -196,19 +303,52 @@ final class AppStore: ObservableObject {
     }
     private func restorePins() {
         pinnedIDs = (try? configuration.baseURL().absoluteString).map { pinSelection.ids(for: $0) } ?? []
+        if selectedPinnedID.map({ pinnedIDs.contains($0) }) != true { selectedPinnedID = pinnedIDs.first }
         if !showsAccountFilters { search = ""; platform = "全部" }
     }
     func isPinned(_ id: Int) -> Bool { pinnedIDs.contains(id) }
     func setPinned(_ pinned: Bool, id: Int) {
         guard id > 0, let server = try? configuration.baseURL().absoluteString else { return }
+        let removedSelected = !pinned && selectedPinnedID == id
+        let previousIndex = selectedPinnedIndex ?? 0
         pinSelection.setPinned(pinned, id: id, server: server)
         if let data = try? JSONEncoder().encode(pinSelection) { defaults.set(data, forKey: pinsKey) }
         restorePins(); cancelPolling()
+        if removedSelected { selectedPinnedID = pinnedIDs.isEmpty ? nil : pinnedIDs[min(previousIndex, pinnedIDs.count - 1)] }
         snapshots.removeAll { !pinnedIDs.contains($0.id) }
         latestAccounts = latestAccounts.filter { pinnedIDs.contains($0.key) }
         pinnedAccountErrors = pinnedAccountErrors.filter { pinnedIDs.contains($0.key) }
+        todayUsage = todayUsage.filter { pinnedIDs.contains($0.key) }
+        todayUsageErrors = todayUsageErrors.filter { pinnedIDs.contains($0.key) }
+        subscriptionUsage = subscriptionUsage.filter { pinnedIDs.contains($0.key) }
+        subscriptionErrors = subscriptionErrors.filter { pinnedIDs.contains($0.key) }
         if !platforms.contains(platform) { platform = "全部" }
         refresh()
+    }
+    func selectPinned(_ id: Int) {
+        guard pinnedIDs.contains(id) else { return }
+        selectedPinnedID = id
+    }
+    func selectAdjacentPinned(_ direction: Int) {
+        guard pinnedIDs.count > 1, [-1, 1].contains(direction), let index = selectedPinnedIndex else { return }
+        selectedPinnedID = pinnedIDs[(index + direction + pinnedIDs.count) % pinnedIDs.count]
+    }
+    func movePinned(_ id: Int, by offset: Int) {
+        guard let source = pinnedIDs.firstIndex(of: id), [-1, 1].contains(offset),
+              pinnedIDs.indices.contains(source + offset), let server = try? configuration.baseURL().absoluteString else { return }
+        pinSelection.move(id: id, to: source + offset, server: server)
+        if let data = try? JSONEncoder().encode(pinSelection) { defaults.set(data, forKey: pinsKey) }
+        restorePins()
+        let order = Dictionary(uniqueKeysWithValues: pinnedIDs.enumerated().map { ($0.element, $0.offset) })
+        snapshots.sort { (order[$0.id] ?? Int.max) < (order[$1.id] ?? Int.max) }
+        // Reordering/selection changes presentation only: no polling cancellation,
+        // new requests, quota cooldown resets, or subscription-statistics changes.
+    }
+    func loadAvailableAccountsIfNeeded() {
+        guard !hasFreshAccountDirectory else { return }
+        // Authentication failure must not become an on-appear retry loop.
+        guard !(needsCredentialAccess && credentialError != nil) else { return }
+        loadAvailableAccounts()
     }
     func loadAvailableAccounts() {
         guard isConfigured, !isLoadingAccounts, !isSaving else { return }
@@ -252,14 +392,25 @@ final class AppStore: ObservableObject {
         if !isRefreshing { nextRuntimeAt = date }
         runDueRefreshes()
     }
-    /// Two independent request lanes: account state and quota/statistics.
+    /// Explicit button action: bypass only the local timer/backoff, never send
+    /// force=true to sub2api. Coalesce clicks with any existing quota request.
+    func refreshManually() {
+        guard canPoll, quotaTask == nil else { return }
+        manualQuotaRefreshPending = true
+        if subscriptionTask == nil { nextSubscriptionAt = now() }
+        refresh()
+    }
+    /// Independent lanes: account state/daily usage, quota/windows, and subscription consumption.
     func runDueRefreshes() {
         guard canPoll else { return }
         let date = now()
         updateQuotaDeadline()
         let runtimeDue = nextRuntimeAt.map { $0 <= date } ?? true
         if !isRefreshing && runtimeDue { refreshRuntime() }
-        if quotaTask == nil, let nextRefreshAt, nextRefreshAt <= date { refreshQuota() }
+        if quotaTask == nil, manualQuotaRefreshPending || (nextRefreshAt.map { $0 <= date } ?? false) {
+            refreshQuota(ignoringSchedule: manualQuotaRefreshPending)
+        }
+        if subscriptionTask == nil, nextSubscriptionAt.map({ $0 <= date }) ?? true { refreshSubscriptions() }
         scheduleWake()
     }
     private var runtimeDelay: Double {
@@ -292,7 +443,9 @@ final class AppStore: ObservableObject {
                 }
             }
             do {
-                let result = try await client(for: config).loadPinnedAccounts(ids: ids)
+                let api = try client(for: config)
+                async let dailyCosts = api.loadTodayUsageBatch(ids: ids)
+                let result = try await api.loadPinnedAccounts(ids: ids)
                 guard generation == token, !Task.isCancelled, canPoll else { return }
                 runtimeFailures = result.accountErrors.isEmpty ? 0 : min(runtimeFailures + 1, 5)
                 pinnedAccountErrors = result.accountErrors
@@ -307,21 +460,40 @@ final class AppStore: ObservableObject {
                 else { lastUpdated = now(); errorMessage = nil }
                 statusUpdatedAt = now()
                 if !platforms.contains(platform) { platform = "全部" }
+                // Start eligible quota work without waiting for daily statistics.
+                runDueRefreshes()
+                do {
+                    let costs = try await dailyCosts
+                    guard generation == token, !Task.isCancelled, canPoll else { return }
+                    todayUsage = costs
+                    todayUsageErrors = Dictionary(uniqueKeysWithValues: ids.filter { costs[$0] == nil }
+                        .map { ($0, "今日用量暂不可用") })
+                } catch {
+                    guard generation == token, !Task.isCancelled else { return }
+                    todayUsage = [:]
+                    todayUsageErrors = Dictionary(uniqueKeysWithValues: ids.map { ($0, "今日用量读取失败") })
+                    handleAuthenticationFailure(error)
+                }
             } catch {
                 guard generation == token, !Task.isCancelled else { return }
+                todayUsage = [:]
+                todayUsageErrors = Dictionary(uniqueKeysWithValues: ids.map { ($0, "今日用量读取失败") })
                 runtimeFailures = min(runtimeFailures + 1, 5); errorMessage = error.localizedDescription
                 handleAuthenticationFailure(error)
             }
         }
     }
-    private func refreshQuota() {
+    private func refreshQuota(ignoringSchedule: Bool = false) {
         guard canPoll, quotaTask == nil,
               let server = try? configuration.baseURL().absoluteString else { return }
         let token = generation; let config = configuration
         let date = now()
-        let accounts = pinnedIDs.filter { quotaDeadline(server: server, id: $0) <= date }
+        let accounts = pinnedIDs.filter { ignoringSchedule || quotaDeadline(server: server, id: $0) <= date }
             .compactMap { latestAccounts[$0] }
         guard !accounts.isEmpty else { return }
+        // If account details were not loaded yet, retain the pending intent
+        // until refreshRuntime can supply them. Cancellation clears it.
+        manualQuotaRefreshPending = false
         isRefreshingQuota = true
         quotaTask = Task { [self] in
             var attempted = false
@@ -416,6 +588,60 @@ final class AppStore: ObservableObject {
         snapshots.removeAll { $0.id == item.id }; snapshots.append(item)
         snapshots.sort { (pinnedIDs.firstIndex(of: $0.id) ?? 0) < (pinnedIDs.firstIndex(of: $1.id) ?? 0) }
     }
+    private var subscriptionRequests: [SubscriptionUsageRequest] {
+        eligibleSubscriptionIDs.compactMap { id in
+            guard latestAccounts[id]?.supportsSubscription == true, let cycle = subscriptionCycle(for: id) else { return nil }
+            return SubscriptionUsageRequest(accountID: id, cycle: cycle)
+        }
+    }
+    private func refreshSubscriptions() {
+        guard canPoll, subscriptionTask == nil else { return }
+        let requests = subscriptionRequests
+        guard !requests.isEmpty else { return }
+        let token = subscriptionGeneration; let config = configuration; let date = now()
+        isRefreshingSubscriptions = true
+        subscriptionTask = Task { [self] in
+            defer {
+                if token == subscriptionGeneration {
+                    subscriptionTask = nil; isRefreshingSubscriptions = false
+                    nextSubscriptionAt = now().addingTimeInterval(min(600, Self.subscriptionInterval * pow(2, Double(subscriptionFailures))))
+                    scheduleWake()
+                }
+            }
+            do {
+                let results = try await client(for: config).loadSubscriptionUsage(requests, includeAdmin: config.includeAdminUsage, at: date)
+                guard token == subscriptionGeneration, !Task.isCancelled, canPoll else { return }
+                subscriptionFailures = results.contains { $0.error != nil } ? min(subscriptionFailures + 1, 5) : 0
+                for result in results {
+                    let id = result.request.accountID
+                    guard eligibleSubscriptionIDs.contains(id), result.request.cycle == subscriptionCycle(for: id) else {
+                        subscriptionUsage[id] = nil
+                        continue
+                    }
+                    if let cost = result.actualCost {
+                        subscriptionUsage[id] = SubscriptionUsageSample(cycle: result.request.cycle, actualCost: cost,
+                            includesAdmin: config.includeAdminUsage, sampledAt: now())
+                        subscriptionErrors[id] = nil
+                    } else {
+                        subscriptionUsage[id] = nil; subscriptionErrors[id] = result.error ?? "订阅消费读取失败"
+                    }
+                }
+            } catch {
+                guard token == subscriptionGeneration, !Task.isCancelled else { return }
+                subscriptionFailures = min(subscriptionFailures + 1, 5)
+                for request in requests {
+                    subscriptionUsage[request.accountID] = nil
+                    subscriptionErrors[request.accountID] = "订阅消费读取失败，请检查统计接口及 Admin 用户权限。"
+                }
+                handleAuthenticationFailure(error)
+            }
+        }
+    }
+    private func cancelSubscriptionPolling() {
+        subscriptionGeneration = UUID()
+        subscriptionTask?.cancel(); subscriptionTask = nil
+        isRefreshingSubscriptions = false; nextSubscriptionAt = nil
+    }
     func secondsUntilRefresh(at date: Date) -> Int? {
         guard canPoll, !isRefreshingQuota, let nextRefreshAt else { return nil }
         return max(0, Int(ceil(nextRefreshAt.timeIntervalSince(date))))
@@ -450,6 +676,7 @@ final class AppStore: ObservableObject {
         var dates: [Date] = []
         if !isRefreshing, let nextRuntimeAt { dates.append(nextRuntimeAt) }
         if quotaTask == nil, let nextRefreshAt { dates.append(nextRefreshAt) }
+        if subscriptionTask == nil, !subscriptionRequests.isEmpty, let nextSubscriptionAt { dates.append(nextSubscriptionAt) }
         guard let next = dates.min() else { return }
         let delay = max(0.05, next.timeIntervalSince(now())); let token = generation
         pollTask = Task { [weak self] in
@@ -460,6 +687,8 @@ final class AppStore: ObservableObject {
     }
     private func cancelPolling() {
         generation = UUID()
+        cancelSubscriptionPolling()
+        manualQuotaRefreshPending = false
         for task in [runtimeTask, quotaTask, pollTask] { task?.cancel() }
         // Keep the quota task as a lock until its cancellation has completed.
         runtimeTask = nil; pollTask = nil

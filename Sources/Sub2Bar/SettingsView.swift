@@ -2,13 +2,14 @@ import SwiftUI
 import Sub2BarCore
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case connection = "连接", refresh = "刷新", accounts = "菜单栏账号"
+    case connection = "连接", refresh = "刷新", accounts = "账号管理", statistics = "消费统计"
     var id: Self { self }
     var symbol: String {
         switch self {
         case .connection: return "network"
         case .refresh: return "arrow.clockwise"
-        case .accounts: return "pin"
+        case .accounts: return "person.2"
+        case .statistics: return "chart.bar"
         }
     }
 }
@@ -58,6 +59,7 @@ struct SettingsView: View {
                     switch page {
                     case .connection: connectionForm
                     case .refresh: refreshForm
+                    case .statistics: statisticsForm
                     case .accounts:
                         VStack(spacing: 10) {
                             if draft != store.configuration {
@@ -101,6 +103,10 @@ struct SettingsView: View {
         }
         .onChange(of: draft.refreshInterval) { _, _ in message = nil }
         .onChange(of: draft.accountRefreshInterval) { _, _ in message = nil }
+        .onChange(of: draft.includeAdminUsage) { _, _ in message = nil }
+        .onChange(of: draft.subscriptionTimeZoneID) { _, _ in message = nil }
+        .onChange(of: draft.actualCostCurrency) { _, _ in message = nil }
+        .onChange(of: draft.subscriptionCostCurrency) { _, _ in message = nil }
         .onChange(of: draft.allowHTTP) { _, _ in message = nil; connectionMessage = nil }
     }
 
@@ -146,7 +152,7 @@ struct SettingsView: View {
                     }
                 }
             } header: { Text("账号状态") }
-            footer: { Text("更新并发、并发上限、调度及异常状态。") }
+            footer: { Text("更新并发、并发上限、调度及异常状态，并批量查询今日用量（标准价）。今日用量只读取 sub2api 本地统计，不查询上游。") }
 
             Section {
                 Picker("额度与费用刷新间隔", selection: $draft.refreshInterval) {
@@ -158,9 +164,43 @@ struct SettingsView: View {
             footer: { Text("一起更新使用比例、重置时间、窗口费用和周额度估算。使用普通查询，不强制刷新上游；sub2api 仍可能按需查询上游。") }
 
             Section {
-                Text("仅面板打开时自动刷新。请求完成后重新计时，失败时延后重试。保存刷新间隔会保留已有数据。")
+                Text("仅面板打开时自动刷新。请求完成后重新计时，失败时延后重试。点击刷新按钮可立即查询一次额度，但不强制刷新上游缓存。保存刷新间隔会保留已有数据。")
                     .font(.callout).foregroundStyle(.secondary)
             }
+        }.formStyle(.grouped).disabled(busy)
+    }
+
+    private var statisticsForm: some View {
+        Form {
+            Section {
+                TextField("实际消费货币符号", text: $draft.actualCostCurrency, prompt: Text("例如 ¥、$、€"))
+                    .textFieldStyle(.roundedBorder)
+                TextField("订阅成本货币符号", text: $draft.subscriptionCostCurrency, prompt: Text("例如 ¥、$、€"))
+                    .textFieldStyle(.roundedBorder)
+            } header: { Text("货币符号") }
+            footer: {
+                Text("直接在金额前显示你填写的符号，例如 ¥230.87。两项可独立设置，不识别货币代码、不换算金额。订阅成本符号同步用于月价和账号列表；其他用量显示保持不变。")
+            }
+            Section {
+                Toggle("将 Admin 消费纳入统计", isOn: $draft.includeAdminUsage).toggleStyle(.switch)
+            } header: { Text("订阅周期实际消费") }
+            footer: {
+                Text("实际消费使用用户扣费金额 actual_cost（含倍率）。关闭后排除当前角色为 Admin 的用户消费；不影响今日标准价用量、周额度统计或订阅成本。")
+            }
+            Section {
+                Picker("统计时区", selection: $draft.subscriptionTimeZoneID) {
+                    ForEach(Array(Set(TimeZone.knownTimeZoneIdentifiers + [draft.subscriptionTimeZoneID])).sorted(), id: \.self) { id in
+                        Text(id).tag(id)
+                    }
+                }
+            } header: { Text("周期边界") }
+            footer: {
+                Text("以此时区每月续费日 00:00 划分周期，包含续费日至下月续费日前一天，例如 9 月 15 日至 10 月 14 日。短月取月末，之后恢复原续费日。默认使用当前 Mac 时区，可改成账单所在时区；按日统计，不代表精确扣款时刻。")
+            }
+            Section {
+                Text("在“账号管理”中为 OAuth 账号填写月订阅价格和每月续费日。只有已 Pin 且配置完整的账号参与消费与成本汇总。")
+                Text("价格、续费日和统计设置仅保存在当前 Mac，不写入 sub2api。订阅消费每 30 秒刷新，失败退避；关闭面板停止请求。")
+            }.font(.callout).foregroundStyle(.secondary)
         }.formStyle(.grouped).disabled(busy)
     }
 

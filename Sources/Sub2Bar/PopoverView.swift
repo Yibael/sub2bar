@@ -12,27 +12,41 @@ struct PopoverView: View {
     @ObservedObject var store: AppStore
     let openSettings: () -> Void
     let version: String
+    let onHeightChange: (CGFloat) -> Void
+    @State private var measurements: [PanelSection: CGFloat] = [:]
 
     init(store: AppStore, openSettings: @escaping () -> Void,
-         version: String = AppVersion.display(in: Bundle.main.infoDictionary)) {
+         version: String = AppVersion.display(in: Bundle.main.infoDictionary),
+         onHeightChange: @escaping (CGFloat) -> Void = { _ in }) {
         self.store = store
         self.openSettings = openSettings
         self.version = version
+        self.onHeightChange = onHeightChange
+    }
+
+    private var panelHeight: CGFloat {
+        PanelSizing.height(measurements: measurements,
+                           hasDashboard: store.isConfigured && !store.needsCredentialAccess && store.pinCount > 0)
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            header.measurePanelSection(.header)
             if !store.isConfigured { welcome }
             else if store.needsCredentialAccess { credentialRequired }
             else if store.pinCount == 0 { noPins }
             else { dashboard }
-            footer
+            footer.measurePanelSection(.footer)
         }
-        .frame(width: 432, height: 660)
+        .frame(width: PanelSizing.width, height: panelHeight)
         .background(NeutralPanelBackground())
         .tint(Theme.accent)
         .environment(\.isMenuPanelSurface, true)
+        .onPreferenceChange(PanelMeasurements.self) { value in
+            if measurements != value { measurements = value }
+        }
+        .onChange(of: panelHeight) { _, height in onHeightChange(height) }
+        .onAppear { onHeightChange(panelHeight) }
     }
 
     private var header: some View {
@@ -49,7 +63,7 @@ struct PopoverView: View {
             refreshStatus
             QuotaRefreshButton(isLoading: store.showsQuotaLoading,
                                isEnabled: !store.needsCredentialAccess && store.isPanelVisible && store.isConfigured && store.pinCount > 0,
-                               action: store.refresh)
+                               action: store.refreshManually)
         }
         .padding(.horizontal, 20).padding(.vertical, 17)
     }
@@ -105,13 +119,21 @@ struct PopoverView: View {
 
     private var dashboard: some View {
         VStack(spacing: 12) {
+            dashboardHeader.measurePanelSection(.dashboard)
+            selectedAccount.fixedSize(horizontal: false, vertical: true).measurePanelSection(.accounts)
+        }.padding(.horizontal, 18).padding(.bottom, 12).fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var dashboardHeader: some View {
+        VStack(spacing: 12) {
+            subscriptionSummary
             HStack(spacing: 10) {
                 summaryCard("总并发", value: store.concurrency.map(String.init) ?? "—",
                             suffix: store.concurrencyLimit.map { "/ \($0)" } ?? "",
                             note: store.snapshots.count == store.pinCount ? "当前 / 上限" : "已读取 \(store.snapshots.count)/\(store.pinCount) 个账号")
                 summaryCard("周额度估算", value: money(store.estimatedTotal),
                             suffix: "", note: "覆盖 \(store.estimatedAccounts.count)/\(store.pinCount) 个账号")
-                    .help("仅汇总已 Pin 的 OpenAI 账号。本周计费 ÷ 周已用比例，不是余额。")
+                    .help("仅汇总已 Pin 的 OpenAI 账号。本周用量 ÷ 周已用比例，不是余额。")
             }
             if let error = store.errorMessage {
                 HStack(alignment: .top, spacing: 7) {
@@ -123,55 +145,58 @@ struct PopoverView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10).insetSurface(cornerRadius: 8)
             }
-            AccountListSummary(overview: store.accountOverview)
-            if store.showsAccountFilters {
-                HStack(spacing: 7) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("搜索已 Pin 账号", text: $store.search).textFieldStyle(.plain)
-                    if !store.search.isEmpty {
-                        Button { store.search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
-                            .buttonStyle(.plain).accessibilityLabel("清空搜索")
-                    }
-                    Picker("平台", selection: $store.platform) {
-                        ForEach(store.platforms, id: \.self) { Text($0).tag($0) }
-                    }.labelsHidden().frame(width: 100).controlSize(.small)
-                }
-                .font(.system(size: 12)).padding(9)
-                .insetSurface(cornerRadius: 7)
+            HStack(spacing: 10) {
+                AccountListSummary(overview: store.accountOverview)
+                if store.pinCount > 1 { accountNavigation }
             }
+        }
+    }
 
-            if store.snapshots.isEmpty && store.pinnedAccountErrors.isEmpty {
-                VStack(spacing: 12) {
-                    Spacer()
-                    Image(systemName: store.isRefreshing ? "arrow.triangle.2.circlepath" : "tray")
-                        .font(.system(size: 28)).foregroundStyle(.tertiary)
-                    Text(store.isRefreshing ? "加载中…" : (store.errorMessage == nil ? "暂无数据" : "加载失败"))
-                        .font(.system(size: 13)).foregroundStyle(.secondary)
-                    Spacer()
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 10) {
-                        ForEach(store.pinnedIDs.filter { store.pinnedAccountErrors[$0] != nil }, id: \.self) { id in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Label("账号 #\(id) 加载失败", systemImage: "exclamationmark.circle")
-                                    .font(.system(size: 12, weight: .medium))
-                                Text(store.pinnedAccountErrors[id] ?? "")
-                                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }.frame(maxWidth: .infinity, alignment: .leading).padding(13).insetSurface(cornerRadius: 9)
-                        }
-                        ForEach(store.filtered.filter { store.pinnedAccountErrors[$0.id] == nil }) { snapshot in
-                            AccountCard(snapshot: snapshot, stale: store.errorMessage != nil,
-                                        isPanelVisible: store.isPanelVisible)
-                        }
-                        if store.filtered.isEmpty && store.pinnedAccountErrors.isEmpty {
-                            Text("没有匹配的账号").foregroundStyle(.secondary).padding(30)
-                        }
-                    }.padding(.bottom, 3)
-                }.scrollIndicators(.hidden)
-            }
-        }.padding(.horizontal, 18).padding(.bottom, 12).frame(maxHeight: .infinity)
+    @ViewBuilder
+    private var selectedAccount: some View {
+        if let id = store.selectedPinnedID, let error = store.pinnedAccountErrors[id] {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("账号 #\(id) 加载失败", systemImage: "exclamationmark.circle")
+                    .font(.system(size: 12, weight: .medium))
+                Text(error)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(13).insetSurface(cornerRadius: 9)
+        } else if let snapshot = store.selectedPinnedSnapshot {
+            AccountCard(snapshot: snapshot, stale: store.errorMessage != nil,
+                        isPanelVisible: store.isPanelVisible,
+                        todayCost: store.todayUsage[snapshot.id],
+                        todayUsageError: store.todayUsageErrors[snapshot.id],
+                        subscription: store.subscriptions[snapshot.id],
+                        subscriptionCycle: store.subscriptionCycle(for: snapshot.id),
+                        subscriptionSample: store.subscriptionSample(for: snapshot.id),
+                        subscriptionError: store.subscriptionErrors[snapshot.id],
+                        actualCostCurrency: store.configuration.actualCostCurrency,
+                        subscriptionCostCurrency: store.configuration.subscriptionCostCurrency,
+                        onSwitchAccount: store.selectAdjacentPinned)
+                .id(snapshot.id)
+        } else {
+            VStack(spacing: 12) {
+                Image(systemName: store.isRefreshing ? "arrow.triangle.2.circlepath" : "tray")
+                    .font(.system(size: 28)).foregroundStyle(.tertiary)
+                Text(store.isRefreshing ? "加载中…" : "账号尚未载入")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity).padding(.vertical, 30)
+        }
+    }
+
+    private var accountNavigation: some View {
+        HStack(spacing: 3) {
+            Button { store.selectAdjacentPinned(-1) } label: { Image(systemName: "chevron.left").frame(width: 22, height: 22) }
+                .keyboardShortcut(.leftArrow, modifiers: [])
+                .help("上一个 Pin 账号").accessibilityLabel("上一个 Pin 账号")
+            Text("\((store.selectedPinnedIndex ?? 0) + 1) / \(store.pinCount)")
+                .font(.system(size: 10, weight: .medium)).monospacedDigit().fixedSize()
+                .accessibilityLabel("第 \((store.selectedPinnedIndex ?? 0) + 1) 个，共 \(store.pinCount) 个 Pin 账号")
+            Button { store.selectAdjacentPinned(1) } label: { Image(systemName: "chevron.right").frame(width: 22, height: 22) }
+                .keyboardShortcut(.rightArrow, modifiers: [])
+                .help("下一个 Pin 账号").accessibilityLabel("下一个 Pin 账号")
+        }.buttonStyle(.plain).font(.system(size: 11, weight: .medium))
     }
 
     private func summaryCard(_ title: String, value: String, suffix: String, note: String) -> some View {
@@ -185,6 +210,30 @@ struct PopoverView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading).padding(13)
         .insetSurface(cornerRadius: 9)
+    }
+
+    private var subscriptionSummary: some View {
+        let count = store.eligibleSubscriptionIDs.count
+        let read = store.eligibleSubscriptionIDs.filter { store.subscriptionSample(for: $0) != nil }.count
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text("本周期实际消费 / 订阅成本").font(.system(size: 11, weight: .medium))
+                Spacer()
+                if store.isRefreshingSubscriptions { ProgressView().controlSize(.mini) }
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Text(subscriptionMoney(store.totalSubscriptionActualCost, unit: store.configuration.actualCostCurrency))
+                    .font(.system(size: 24, weight: .semibold))
+                Text("/ \(subscriptionMoney(store.totalSubscriptionCost, unit: store.configuration.subscriptionCostCurrency))")
+                    .font(.system(size: 16)).foregroundStyle(.secondary)
+            }.monospacedDigit().lineLimit(1).minimumScaleFactor(0.65)
+            if count == 0 {
+                Text("请在账号管理中配置订阅").font(.system(size: 10)).foregroundStyle(.secondary)
+            } else if read < count {
+                Text("统计未完整").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(13).insetSurface(cornerRadius: 9)
+            .help("各账号按自己的当前订阅周期统计实际用户扣费（含倍率）；成本是同一组账号完整月订阅价之和，不按天摊销。统计时区：\(store.configuration.subscriptionTimeZoneID)。")
     }
 
     private var footer: some View {
@@ -326,12 +375,21 @@ struct AccountCard: View {
     let snapshot: AccountSnapshot
     let stale: Bool
     let isPanelVisible: Bool
-    @State private var expanded = false
+    var todayCost: Double? = nil
+    var todayUsageError: String? = nil
+    var subscription: AccountSubscription? = nil
+    var subscriptionCycle: SubscriptionCycle? = nil
+    var subscriptionSample: SubscriptionUsageSample? = nil
+    var subscriptionError: String? = nil
+    var actualCostCurrency = "$"
+    var subscriptionCostCurrency = "$"
+    var onSwitchAccount: ((Int) -> Void)? = nil
+    @State var expanded = false
     private var account: Account { snapshot.account }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            Button { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } } label: {
+        VStack(alignment: .leading, spacing: 12) {
+            Button { expanded.toggle() } label: {
                 HStack(spacing: 9) {
                     ProviderIcon(platform: account.platform)
                         .frame(width: 28, height: 28).insetSurface(cornerRadius: 6)
@@ -355,7 +413,7 @@ struct AccountCard: View {
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                         .font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
                 }.contentShape(Rectangle())
-            }.buttonStyle(.plain).help("展开账号详情")
+            }.buttonStyle(.plain).help(expanded ? "收起账号详情" : "展开账号详情")
 
             if isPanelVisible {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -364,13 +422,44 @@ struct AccountCard: View {
             } else {
                 quotaLines(at: .now)
             }
-            HStack(spacing: 4) {
-                Text("周额度估算")
-                Text(money(snapshot.estimatedWeeklyCost)).foregroundStyle(.primary).monospacedDigit()
-                Spacer()
-                Text("本周计费")
-                Text(money(snapshot.weeklyCost)).monospacedDigit()
-            }.font(.system(size: 10)).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                usageMetric("今日用量", todayCost, alignment: .leading)
+                    .help("按标准价格折算，不含倍率；从服务端时区今日 00:00 起，仅统计本实例记录的用量。")
+                Divider().frame(height: 28)
+                usageMetric("本周用量", snapshot.weeklyCost, alignment: .leading)
+                    .help("7 天额度重置窗口内的账号口径费用，包含账号倍率，不是自然周。")
+                Divider().frame(height: 28)
+                usageMetric("周额度估算", snapshot.estimatedWeeklyCost, alignment: .leading)
+            }.padding(.vertical, 4)
+
+            if account.supportsSubscription {
+                if subscription?.isComplete == true {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 12) {
+                            textMetric("周期消费", subscriptionMoney(subscriptionSample?.actualCost, unit: actualCostCurrency))
+                                .help("当前订阅周期实际扣费（含倍率）")
+                            Divider().frame(height: 28)
+                            textMetric("订阅成本", subscriptionMoney(subscription?.monthlyPrice, unit: subscriptionCostCurrency))
+                            Divider().frame(height: 28)
+                            textMetric("周期", subscriptionCycle?.shortLabel ?? "—")
+                                .help(subscriptionCycle?.label ?? "周期不可用")
+                        }
+                        if let subscriptionError {
+                            Text(subscriptionError).font(.system(size: 10)).foregroundStyle(.secondary)
+                        } else if subscriptionSample == nil {
+                            Text("消费统计待更新").font(.system(size: 10)).foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    Text("订阅未配置完整 · 不纳入消费与成本汇总")
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+            }
+
+            if let todayUsageError {
+                Label(todayUsageError, systemImage: "exclamationmark.circle")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
 
             if snapshot.usageError != nil {
                 Label("额度读取失败", systemImage: "exclamationmark.circle")
@@ -383,6 +472,28 @@ struct AccountCard: View {
         }
         .padding(13).insetSurface(cornerRadius: 9)
         .opacity(stale ? 0.65 : 1)
+        .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
+            // Expanded detail text remains selectable without accidental paging.
+            guard !expanded, abs(value.translation.width) > 50,
+                  abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
+            onSwitchAccount?(value.translation.width < 0 ? 1 : -1)
+        })
+    }
+
+    private func usageMetric(_ title: String, _ value: Double?, alignment: HorizontalAlignment) -> some View {
+        VStack(alignment: alignment, spacing: 3) {
+            Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(money(value)).font(.system(size: 12, weight: .medium)).monospacedDigit()
+                .lineLimit(1).minimumScaleFactor(0.75)
+        }.frame(maxWidth: .infinity, alignment: Alignment(horizontal: alignment, vertical: .center))
+    }
+
+    private func textMetric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 12, weight: .medium)).monospacedDigit()
+                .lineLimit(1).minimumScaleFactor(0.75)
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func quotaLines(at date: Date) -> some View {
@@ -425,7 +536,14 @@ struct AccountCard: View {
             detail("类型", account.type ?? "—")
             detail("5 小时重置", resetText(snapshot.usage?.fiveHour))
             detail("7 天重置", resetText(snapshot.usage?.sevenDay))
-            detail("本周计费", money(snapshot.weeklyCost))
+            detail("今日用量（标准价）", money(todayCost))
+            detail("本周用量", money(snapshot.weeklyCost))
+            if let subscriptionCycle { detail("订阅周期（含首尾）", subscriptionCycle.label) }
+            if let subscriptionSample {
+                detail("本周期消费采样", subscriptionSample.sampledAt.formatted(date: .abbreviated, time: .shortened))
+                detail("消费口径", subscriptionSample.includesAdmin ? "实际扣费 · 含 Admin" : "实际扣费 · 不含 Admin")
+                detail("周期时区", subscriptionSample.cycle.timeZoneID)
+            }
             if let updated = snapshot.statisticsUpdatedAt {
                 detail("计费统计采样", updated.formatted(date: .omitted, time: .standard))
             }
@@ -456,4 +574,8 @@ struct AccountCard: View {
 func money(_ value: Double?) -> String {
     guard let value, value.isFinite else { return "—" }
     return value.formatted(.currency(code: "USD").locale(Locale(identifier: "en_US")))
+}
+
+func subscriptionMoney(_ value: Decimal?, unit: String = "$") -> String {
+    CurrencyUnit.format(value, unit: unit)
 }

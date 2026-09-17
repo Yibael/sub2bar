@@ -30,7 +30,7 @@ public final class APIClient: @unchecked Sendable {
 
     deinit { session.invalidateAndCancel() }
 
-    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
+    func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
         try await request(path, query: query)
     }
 
@@ -91,6 +91,29 @@ public final class APIClient: @unchecked Sendable {
     /// Runtime / status polling only. Does not call /usage or list all accounts.
     public func loadPinnedAccounts(ids: [Int]) async throws -> PinnedSnapshotResult {
         try await fetchPinned(ids: ids, includeUsage: false)
+    }
+
+    /// Database-only daily statistics, in the server's timezone. Never substitute
+    /// account/user billing costs or call the upstream-aware /usage endpoint.
+    public func loadTodayUsageBatch(ids: [Int]) async throws -> [Int: Double] {
+        struct Body: Encodable { let account_ids: [Int] }
+        struct Stats: Decodable { let standardCost: Double? }
+        struct Payload: Decodable { let stats: [String: Stats] }
+        var seen = Set<Int>()
+        let ids = ids.filter { $0 > 0 && seen.insert($0).inserted }
+        var costs: [Int: Double] = [:]
+        for start in stride(from: 0, to: ids.count, by: 100) {
+            try Task.checkCancellation()
+            let chunk = Array(ids[start..<min(start + 100, ids.count)])
+            let data = try JSONEncoder().encode(Body(account_ids: chunk))
+            let response: Payload = try await request("accounts/today-stats/batch", method: "POST", body: data)
+            for id in chunk {
+                if let cost = response.stats[String(id)]?.standardCost, cost.isFinite, cost >= 0 {
+                    costs[id] = cost
+                }
+            }
+        }
+        return costs
     }
 
     public func loadUsage(for account: Account, passive: Bool) async throws -> UsageInfo {

@@ -346,6 +346,19 @@ private final class RequestLog: @unchecked Sendable {
 }
 
 final class PinnedSelectionTests: XCTestCase {
+    func testMovingPinsChangesOnlyOrderWithinTheChosenServer() throws {
+        var pins = PinnedAccountSelection()
+        for id in [7, 2, 9] { pins.setPinned(true, id: id, server: "A") }
+        pins.setPinned(true, id: 7, server: "B")
+        pins.move(id: 9, to: 0, server: "A")
+        XCTAssertEqual(pins.ids(for: "A"), [9, 7, 2])
+        XCTAssertEqual(pins.ids(for: "B"), [7])
+        pins.move(id: 999, to: 0, server: "A")
+        pins.move(id: 7, to: -1, server: "A")
+        pins.move(id: 7, to: 9, server: "A")
+        let restored = try JSONDecoder().decode(PinnedAccountSelection.self, from: JSONEncoder().encode(pins))
+        XCTAssertEqual(restored.ids(for: "A"), [9, 7, 2])
+    }
     func testPinSelectionPersistsOrderAndSeparatesServers() throws {
         var pins = PinnedAccountSelection()
         pins.setPinned(true, id: 8, server: "https://a.example")
