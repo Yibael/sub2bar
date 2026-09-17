@@ -42,6 +42,11 @@ final class MockBackend: @unchecked Sendable {
     private var _delayToday = 0.0
     private var todayBatches: [[Int]] = []
     private var _actualCost = 100.0
+    private var _todayActualCost = 30.0
+    private var _todayAdminCost = 5.0
+    private var _todayStatsError = 0
+    private var _failedTodayStatsIDs: Set<Int> = []
+    private var _delayTodayStats = 0.0
     private var _adminCost = 20.0
     private var _statsError = 0
     private var _usersError = 0
@@ -49,6 +54,7 @@ final class MockBackend: @unchecked Sendable {
     private var _delayStats = 0.0
     private var _delayAccounts = 0.0
     private var _directoryIDs = [1]
+    private var _directoryItems: [[String: Any]]?
     private var _batchUnavailable = false
     private var batches: [[Int]] = []
     private var _status = "active"
@@ -70,6 +76,11 @@ final class MockBackend: @unchecked Sendable {
     var todayBatchIDs: [[Int]] { lock.withLock { todayBatches } }
     var todayCount: Int { requests.filter { $0.hasSuffix("/today-stats/batch") }.count }
     var actualCost: Double { get { lock.withLock { _actualCost } } set { lock.withLock { _actualCost = newValue } } }
+    var todayActualCost: Double { get { lock.withLock { _todayActualCost } } set { lock.withLock { _todayActualCost = newValue } } }
+    var todayAdminCost: Double { get { lock.withLock { _todayAdminCost } } set { lock.withLock { _todayAdminCost = newValue } } }
+    var todayStatsError: Int { get { lock.withLock { _todayStatsError } } set { lock.withLock { _todayStatsError = newValue } } }
+    var failedTodayStatsIDs: Set<Int> { get { lock.withLock { _failedTodayStatsIDs } } set { lock.withLock { _failedTodayStatsIDs = newValue } } }
+    var delayTodayStats: Double { get { lock.withLock { _delayTodayStats } } set { lock.withLock { _delayTodayStats = newValue } } }
     var adminCost: Double { get { lock.withLock { _adminCost } } set { lock.withLock { _adminCost = newValue } } }
     var statsError: Int { get { lock.withLock { _statsError } } set { lock.withLock { _statsError = newValue } } }
     var usersError: Int { get { lock.withLock { _usersError } } set { lock.withLock { _usersError = newValue } } }
@@ -80,6 +91,7 @@ final class MockBackend: @unchecked Sendable {
     var directoryCount: Int { requests.filter { $0.contains("/accounts?") }.count }
     var delayAccounts: Double { get { lock.withLock { _delayAccounts } } set { lock.withLock { _delayAccounts = newValue } } }
     var directoryIDs: [Int] { get { lock.withLock { _directoryIDs } } set { lock.withLock { _directoryIDs = newValue } } }
+    var directoryItems: [[String: Any]]? { get { lock.withLock { _directoryItems } } set { lock.withLock { _directoryItems = newValue } } }
     var batchUnavailable: Bool { get { lock.withLock { _batchUnavailable } } set { lock.withLock { _batchUnavailable = newValue } } }
     var batchIDs: [[Int]] { lock.withLock { batches } }
     var batchCount: Int { requests.filter { $0.hasSuffix("/usage/batch") }.count }
@@ -117,8 +129,12 @@ final class MockBackend: @unchecked Sendable {
                 let id = Int(query["account_id"] ?? "") ?? 0
                 if _statsError > 0 { return (_statsError, "private-secret-error", _delayStats) }
                 if _failedStatsIDs.contains(id) { return (503, "private-secret-error", _delayStats) }
-                let cost = query["user_id"] == nil ? _actualCost : _adminCost
-                return (200, "{\"code\":0,\"data\":{\"total_actual_cost\":\(cost),\"total_cost\":999}}", _delayStats)
+                let today = query["start_date"] == query["end_date"]
+                if today && _todayStatsError > 0 { return (_todayStatsError, "private-secret-error", _delayTodayStats) }
+                if today && _failedTodayStatsIDs.contains(id) { return (503, "private-secret-error", _delayTodayStats) }
+                let cost = today ? (query["user_id"] == nil ? _todayActualCost : _todayAdminCost) :
+                    (query["user_id"] == nil ? _actualCost : _adminCost)
+                return (200, "{\"code\":0,\"data\":{\"total_actual_cost\":\(cost),\"total_cost\":999}}", today ? _delayTodayStats : _delayStats)
             }
             if isTodayBatch {
                 let body = (try? JSONSerialization.jsonObject(with: testRequestBody(request))) as? [String: Any]
@@ -158,7 +174,7 @@ final class MockBackend: @unchecked Sendable {
             let id = Int(url.lastPathComponent) ?? 1
             let item = "{\"id\":\(id),\"name\":\"Account \(id)\",\"platform\":\"\(_platform)\",\"type\":\"oauth\",\"status\":\"\(_status)\",\"schedulable\":true,\"concurrency\":5,\"current_concurrency\":\(_concurrency),\"extra\":{\"codex_5h_used_percent\":10,\"codex_7d_used_percent\":\(_percentage),\"codex_usage_updated_at\":\"2026-09-15T10:00:00Z\",\"codex_7d_reset_at\":\"2026-09-20T10:00:00Z\"}}"
             if url.path.hasSuffix("/accounts") {
-                let items: [[String: Any]] = _directoryIDs.map { ["id": $0, "name": "Account \($0)", "platform": _platform,
+                let items: [[String: Any]] = _directoryItems ?? _directoryIDs.map { ["id": $0, "name": "Account \($0)", "platform": _platform,
                     "type": "oauth", "status": _status, "schedulable": true, "concurrency": 5, "current_concurrency": _concurrency] }
                 let data = try! JSONSerialization.data(withJSONObject: ["code": 0, "data": ["items": items, "total": items.count]])
                 return (200, String(decoding: data, as: UTF8.self), _delayAccounts)
@@ -198,9 +214,11 @@ final class StoreFixture {
     let backend = MockBackend()
     var date = parseAPIDate("2026-09-15T10:00:00Z")!
     var store: AppStore!
-    init(ids: [Int] = [1], interval: Double = 5, vault: MemoryVault = MemoryVault(), automatic: Bool = false, accountInterval: Double = 2) throws {
+    init(ids: [Int] = [1], interval: Double = 5, vault: MemoryVault = MemoryVault(), automatic: Bool = false,
+         accountInterval: Double = 2, statisticsInterval: Double = 30) throws {
         defaults = UserDefaults(suiteName: name)!; self.vault = vault
-        defaults.set(try JSONEncoder().encode(Configuration(serverURL: "https://example.invalid", refreshInterval: interval, accountRefreshInterval: accountInterval)), forKey: "sub2bar.configuration.v1")
+        defaults.set(try JSONEncoder().encode(Configuration(serverURL: "https://example.invalid", refreshInterval: interval,
+            accountRefreshInterval: accountInterval, statisticsRefreshInterval: statisticsInterval)), forKey: "sub2bar.configuration.v1")
         var pins = PinnedAccountSelection()
         for id in ids { pins.setPinned(true, id: id, server: "https://example.invalid") }
         defaults.set(try JSONEncoder().encode(pins), forKey: "sub2bar.pins.v1")

@@ -126,14 +126,17 @@ struct PopoverView: View {
 
     private var dashboardHeader: some View {
         VStack(spacing: 12) {
-            subscriptionSummary
+            HStack(alignment: .top, spacing: 10) {
+                todayActualSummary
+                subscriptionSummary
+            }
             HStack(spacing: 10) {
                 summaryCard("总并发", value: store.concurrency.map(String.init) ?? "—",
-                            suffix: store.concurrencyLimit.map { "/ \($0)" } ?? "",
-                            note: store.snapshots.count == store.pinCount ? "当前 / 上限" : "已读取 \(store.snapshots.count)/\(store.pinCount) 个账号")
+                            suffix: store.concurrencyLimit.map { "/ \($0)" } ?? "")
+                    .help("当前并发 / 并发上限；已读取 \(store.snapshots.count)/\(store.pinCount) 个账号。")
                 summaryCard("周额度估算", value: money(store.estimatedTotal),
-                            suffix: "", note: "覆盖 \(store.estimatedAccounts.count)/\(store.pinCount) 个账号")
-                    .help("仅汇总已 Pin 的 OpenAI 账号。本周用量 ÷ 周已用比例，不是余额。")
+                            suffix: "")
+                    .help("仅汇总已 Pin 的 OpenAI 账号。本周用量 ÷ 周已用比例，不是余额。覆盖 \(store.estimatedAccounts.count)/\(store.pinCount) 个账号。")
             }
             if let error = store.errorMessage {
                 HStack(alignment: .top, spacing: 7) {
@@ -199,41 +202,53 @@ struct PopoverView: View {
         }.buttonStyle(.plain).font(.system(size: 11, weight: .medium))
     }
 
-    private func summaryCard(_ title: String, value: String, suffix: String, note: String) -> some View {
+    private func summaryCard(_ title: String, value: String, suffix: String) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(value).font(.system(size: 25, weight: .semibold)).minimumScaleFactor(0.7)
                 Text(suffix).font(.system(size: 14, weight: .medium)).foregroundStyle(.tertiary)
             }.lineLimit(1).monospacedDigit()
-            Text(note).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading).padding(13)
         .insetSurface(cornerRadius: 9)
     }
 
+    private var todayActualSummary: some View {
+        actualCostSummary(title: "今日实际消费", value: store.totalTodayActualCost,
+            note: store.eligibleSubscriptionIDs.isEmpty ? "请先配置订阅" :
+                (store.totalTodayActualCost == nil ? "统计未完整" : ""))
+            .help("与周期汇总使用相同的已 Pin 且订阅配置完整的 OAuth 账号，按统计时区今日零点起计算实际用户扣费（含倍率），沿用 Admin 开关。统计时区：\(store.configuration.subscriptionTimeZoneID)。")
+    }
+
     private var subscriptionSummary: some View {
         let count = store.eligibleSubscriptionIDs.count
         let read = store.eligibleSubscriptionIDs.filter { store.subscriptionSample(for: $0) != nil }.count
+        return actualCostSummary(title: "周期实际消费", value: store.totalSubscriptionActualCost,
+            note: count == 0 ? "请先配置订阅" : (read < count ? "统计未完整" : ""),
+            cost: subscriptionMoney(store.totalSubscriptionCost, unit: store.configuration.subscriptionCostCurrency))
+            .help("各账号按自己的当前订阅周期统计实际用户扣费（含倍率）；成本是同一组账号完整月订阅价之和，不按天摊销。统计时区：\(store.configuration.subscriptionTimeZoneID)。")
+    }
+
+    private func actualCostSummary(title: String, value: Decimal?, note: String, cost: String? = nil) -> some View {
         return VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text("本周期实际消费 / 订阅成本").font(.system(size: 11, weight: .medium))
-                Spacer()
-                if store.isRefreshingSubscriptions { ProgressView().controlSize(.mini) }
+            HStack(spacing: 4) {
+                Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if store.isRefreshingSubscriptions { ProgressView().controlSize(.mini).frame(width: 10, height: 10) }
             }
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                Text(subscriptionMoney(store.totalSubscriptionActualCost, unit: store.configuration.actualCostCurrency))
-                    .font(.system(size: 24, weight: .semibold))
-                Text("/ \(subscriptionMoney(store.totalSubscriptionCost, unit: store.configuration.subscriptionCostCurrency))")
-                    .font(.system(size: 16)).foregroundStyle(.secondary)
-            }.monospacedDigit().lineLimit(1).minimumScaleFactor(0.65)
-            if count == 0 {
-                Text("请在账号管理中配置订阅").font(.system(size: 10)).foregroundStyle(.secondary)
-            } else if read < count {
-                Text("统计未完整").font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(subscriptionMoney(value, unit: store.configuration.actualCostCurrency))
+                .font(.system(size: 24, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.5)
+            HStack(spacing: 4) {
+                if let cost {
+                    Text("订阅成本").foregroundStyle(.secondary)
+                    Text(cost).foregroundStyle(.secondary).monospacedDigit()
+                } else { Text(note).foregroundStyle(.secondary) }
+            }.font(.system(size: 10)).lineLimit(1).minimumScaleFactor(0.5).frame(height: 13)
+            if cost != nil && !note.isEmpty {
+                Text(note).font(.system(size: 10)).foregroundStyle(.secondary)
             }
         }.frame(maxWidth: .infinity, alignment: .leading).padding(13).insetSurface(cornerRadius: 9)
-            .help("各账号按自己的当前订阅周期统计实际用户扣费（含倍率）；成本是同一组账号完整月订阅价之和，不按天摊销。统计时区：\(store.configuration.subscriptionTimeZoneID)。")
     }
 
     private var footer: some View {

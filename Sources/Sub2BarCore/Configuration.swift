@@ -7,9 +7,12 @@ public struct Configuration: Codable, Equatable, Sendable {
     public static let quotaIntervals: [Double] = [5, 10, 15, 30, 60, 120]
     public static let accountIntervals: [Double] = [2, 5, 10, 15, 30]
     public static let defaultAccountRefreshInterval: Double = 2
+    public static let statisticsIntervals: [Double] = [2, 5, 10, 15, 30, 60, 120]
+    public static let defaultStatisticsRefreshInterval: Double = 2
     public var serverURL: String
     public var refreshInterval: Double
     public var accountRefreshInterval: Double
+    public var statisticsRefreshInterval: Double
     public var allowHTTP: Bool
     public var includeAdminUsage: Bool
     public var subscriptionTimeZoneID: String
@@ -20,11 +23,13 @@ public struct Configuration: Codable, Equatable, Sendable {
     public init(serverURL: String = "", refreshInterval: Double = Configuration.defaultRefreshInterval,
                 allowHTTP: Bool = false, accountRefreshInterval: Double = Configuration.defaultAccountRefreshInterval,
                 includeAdminUsage: Bool = true, subscriptionTimeZoneID: String = TimeZone.current.identifier,
-                actualCostCurrency: String = "$", subscriptionCostCurrency: String = "$") {
+                actualCostCurrency: String = "$", subscriptionCostCurrency: String = "$",
+                statisticsRefreshInterval: Double = Configuration.defaultStatisticsRefreshInterval) {
         self.serverURL = serverURL
         self.refreshInterval = refreshInterval
         self.allowHTTP = allowHTTP
         self.accountRefreshInterval = accountRefreshInterval
+        self.statisticsRefreshInterval = statisticsRefreshInterval
         self.includeAdminUsage = includeAdminUsage
         self.subscriptionTimeZoneID = subscriptionTimeZoneID
         self.actualCostCurrency = actualCostCurrency
@@ -33,7 +38,7 @@ public struct Configuration: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case serverURL, refreshInterval, accountRefreshInterval, allowHTTP, includeAdminUsage, subscriptionTimeZoneID
-        case actualCostCurrency, subscriptionCostCurrency
+        case actualCostCurrency, subscriptionCostCurrency, statisticsRefreshInterval
         case currencySymbolsVersion
     }
 
@@ -43,6 +48,7 @@ public struct Configuration: Codable, Equatable, Sendable {
         // Preserve the user's existing quota interval when upgrading.
         refreshInterval = try values.decodeIfPresent(Double.self, forKey: .refreshInterval) ?? Self.defaultRefreshInterval
         accountRefreshInterval = try values.decodeIfPresent(Double.self, forKey: .accountRefreshInterval) ?? Self.defaultAccountRefreshInterval
+        statisticsRefreshInterval = try values.decodeIfPresent(Double.self, forKey: .statisticsRefreshInterval) ?? Self.defaultStatisticsRefreshInterval
         allowHTTP = try values.decodeIfPresent(Bool.self, forKey: .allowHTTP) ?? false
         includeAdminUsage = try values.decodeIfPresent(Bool.self, forKey: .includeAdminUsage) ?? true
         subscriptionTimeZoneID = try values.decodeIfPresent(String.self, forKey: .subscriptionTimeZoneID) ?? TimeZone.current.identifier
@@ -61,6 +67,11 @@ public struct Configuration: Codable, Equatable, Sendable {
     public var effectiveRefreshInterval: Double {
         guard refreshInterval.isFinite else { return Self.defaultRefreshInterval }
         return Self.quotaIntervals.first(where: { $0 >= refreshInterval }) ?? Self.maximumRefreshInterval
+    }
+
+    public var effectiveStatisticsRefreshInterval: Double {
+        guard statisticsRefreshInterval.isFinite else { return Self.defaultStatisticsRefreshInterval }
+        return Self.statisticsIntervals.first(where: { $0 >= statisticsRefreshInterval }) ?? 120
     }
 
     public func baseURL() throws -> URL {

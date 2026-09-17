@@ -88,8 +88,24 @@ public struct SubscriptionUsageResult: Sendable {
     public let request: SubscriptionUsageRequest
     public let actualCost: Decimal?
     public let error: String?
-    public init(request: SubscriptionUsageRequest, actualCost: Decimal?, error: String?) {
+    public let todayActualCost: Decimal?
+    public let todayError: String?
+    public init(request: SubscriptionUsageRequest, actualCost: Decimal?, error: String?,
+                todayActualCost: Decimal? = nil, todayError: String? = nil) {
         self.request = request; self.actualCost = actualCost; self.error = error
+        self.todayActualCost = todayActualCost; self.todayError = todayError
+    }
+}
+
+public struct TodayActualUsageSample: Sendable {
+    public let day: String
+    public let timeZoneID: String
+    public let actualCost: Decimal
+    public let includesAdmin: Bool
+    public let sampledAt: Date
+    public init(day: String, timeZoneID: String, actualCost: Decimal, includesAdmin: Bool, sampledAt: Date) {
+        self.day = day; self.timeZoneID = timeZoneID; self.actualCost = actualCost
+        self.includesAdmin = includesAdmin; self.sampledAt = sampledAt
     }
 }
 

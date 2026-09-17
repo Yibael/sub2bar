@@ -6,6 +6,49 @@ import Sub2BarCore
 
 @MainActor
 final class AppearanceTests: XCTestCase {
+    func testAccountManagementGroupedLayoutRendersWithMixedAccounts() async throws {
+        let f = try StoreFixture(); defer { f.cleanup() }
+        // Synthetic directory data only; never read the user's configuration.
+        f.backend.directoryItems = [
+            ["id": 1, "name": "GPT Pro 主账号", "platform": "openai", "type": "oauth", "status": "active", "schedulable": true],
+            ["id": 2, "name": "Claude 日常", "platform": "anthropic", "type": "apikey", "status": "active", "schedulable": true],
+            ["id": 3, "name": "GPT Plus 备用", "platform": "openai", "type": "oauth", "status": "active", "schedulable": true],
+            ["id": 4, "name": "GPT 测试账号", "platform": "openai", "type": "apikey", "status": "active", "schedulable": false],
+            ["id": 5, "name": "很长的账号名称用于验证窄列截断和操作按钮保持完整显示", "platform": "gemini", "type": "oauth", "status": "error"],
+            ["id": 6, "name": "Claude 备用", "platform": "anthropic", "type": "oauth", "status": "active", "schedulable": true]
+        ]
+        await f.open()
+        try f.store.saveSubscription(AccountSubscription(monthlyPrice: 1366, renewalDay: 15), for: try XCTUnwrap(f.store.snapshots.first?.account))
+        await f.until { !f.store.isRefreshingSubscriptions }
+        f.store.setPanelVisible(false)
+        var config = f.store.configuration; config.subscriptionCostCurrency = "¥"
+        try await f.store.save(config, key: "fake-secret")
+        f.store.loadAvailableAccountsIfNeeded()
+        await f.until { f.store.hasLoadedAccounts && !f.store.isLoadingAccounts }
+        let calls = f.backend.requests.count
+        let window = WindowFactory.settings()
+        defer { window.close() }
+        for scheme in [ColorScheme.light, .dark] {
+            let host = NSHostingView(rootView: SettingsView(store: f.store, page: .accounts).environment(\.colorScheme, scheme))
+            window.contentView = host
+            host.frame = NSRect(x: 0, y: 0, width: 760, height: 620)
+            host.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(100))
+            host.layoutSubtreeIfNeeded()
+            XCTAssertEqual(host.bounds.width, 760)
+            XCTAssertEqual(host.bounds.height, 620)
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            if let output = ProcessInfo.processInfo.environment["SUB2BAR_RENDER_DIR"] {
+                let directory = URL(fileURLWithPath: output, isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                try data.write(to: directory.appendingPathComponent("account-management-\(scheme == .light ? "light" : "dark").png"))
+            }
+        }
+        XCTAssertEqual(f.backend.requests.count, calls, "Showing the cached directory must not query again")
+    }
+
     func testNeutralPanelBackgroundBlocksBlueAndRedInLightAndDark() throws {
         for scheme in [ColorScheme.light, .dark] {
             for underlying in [Color.blue, Color.red] {

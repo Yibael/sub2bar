@@ -165,4 +165,81 @@ final class SubscriptionAPITests: XCTestCase {
         } catch { XCTAssertEqual(error as? SubscriptionError, .invalidConfiguration) }
         XCTAssertEqual(ranges, [["2026-09-15", "2026-10-14"], ["2026-10-15", "2026-10-15"]])
     }
+
+    func testTodayUsesSingleCalendarDayAndSharedAdminDiscovery() async throws {
+        var adminReads = 0
+        var dailyUserIDs: [String] = []
+        SubscriptionProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            let q = self.query(request)
+            if request.url!.path.hasSuffix("/users") {
+                adminReads += 1
+                return (200, try self.envelope(["items": [["id": 9, "role": "admin"], ["id": 42, "role": "admin"]], "total": 2]))
+            }
+            XCTAssertEqual(request.url?.path, "/api/v1/admin/usage/stats")
+            XCTAssertEqual(q["timezone"], "Asia/Shanghai")
+            XCTAssertEqual(q["account_id"], "7")
+            XCTAssertEqual(q["end_date"], "2026-09-17")
+            XCTAssertEqual(q["nocache"], "true")
+            let today = q["start_date"] == "2026-09-17"
+            if today { dailyUserIDs.append(q["user_id"] ?? "total") }
+            else { XCTAssertEqual(q["start_date"], "2026-09-12") }
+            let total = today ? 30 : 100
+            return (200, try self.envelope(["total_actual_cost": q["user_id"] == nil ? total : 5, "total_cost": 999]))
+        }
+        let result = try await client().loadSubscriptionUsage([request()], includeAdmin: false, at: date, includeToday: true)
+        XCTAssertEqual(adminReads, 1)
+        XCTAssertEqual(dailyUserIDs, ["9", "42", "total"])
+        XCTAssertEqual(result.first?.actualCost, 90)
+        XCTAssertEqual(result.first?.todayActualCost, 20)
+    }
+
+    func testTodayAndCycleFailuresAreIndependent() async throws {
+        for failedToday in [false, true] {
+            SubscriptionProtocol.handler = { request in
+                let today = self.query(request)["start_date"] == "2026-09-17"
+                return (200, today == failedToday ? #"{"code":0,"data":{"total_cost":999}}"# : #"{"code":0,"data":{"total_actual_cost":0}}"#)
+            }
+            let result = try await client().loadSubscriptionUsage([request()], includeAdmin: true, at: date, includeToday: true)[0]
+            XCTAssertEqual(result.actualCost, failedToday ? 0 : nil)
+            XCTAssertEqual(result.todayActualCost, failedToday ? nil : 0)
+            XCTAssertEqual(result.todayError != nil, failedToday)
+            XCTAssertEqual(result.error != nil, !failedToday)
+        }
+    }
+
+    func testRenewalDayReusesIdenticalRangeWithoutDoubleCounting() async throws {
+        let renewal = parseAPIDate("2026-09-11T16:00:00Z")!
+        var calls = 0
+        SubscriptionProtocol.handler = { request in
+            calls += 1
+            XCTAssertEqual(self.query(request)["start_date"], "2026-09-12")
+            XCTAssertEqual(self.query(request)["end_date"], "2026-09-12")
+            return (200, #"{"code":0,"data":{"total_actual_cost":12.34}}"#)
+        }
+        let result = try await client().loadSubscriptionUsage([request()], includeAdmin: true, at: renewal, includeToday: true)
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(result.first?.actualCost, result.first?.todayActualCost)
+        XCTAssertEqual(result.first?.todayActualCost, Decimal(string: "12.34"))
+    }
+
+    func testTodayUsesReportingTimezoneAcrossDSTAndUTCDateBoundary() async throws {
+        for (instant, expected) in [("2026-03-08T07:59:59Z", "2026-03-07"), ("2026-03-08T08:00:00Z", "2026-03-08"),
+                                     ("2026-03-09T06:59:59Z", "2026-03-08"), ("2026-03-09T07:00:00Z", "2026-03-09")] {
+            let now = parseAPIDate(instant)!
+            let request = SubscriptionUsageRequest(accountID: 7, cycle: SubscriptionCycle(renewalDay: 1, at: now, timeZoneID: "America/Los_Angeles")!)
+            var dayQueries = 0
+            SubscriptionProtocol.handler = { req in
+                let q = self.query(req)
+                if q["start_date"] == q["end_date"] {
+                    dayQueries += 1
+                    XCTAssertEqual(q["start_date"], expected)
+                    XCTAssertEqual(q["timezone"], "America/Los_Angeles")
+                }
+                return (200, #"{"code":0,"data":{"total_actual_cost":0}}"#)
+            }
+            _ = try await client().loadSubscriptionUsage([request], includeAdmin: true, at: now, includeToday: true)
+            XCTAssertEqual(dayQueries, 1)
+        }
+    }
 }

@@ -54,7 +54,7 @@ final class SubscriptionMonitorTests: XCTestCase {
         try await f.store.save(config, key: "fake-secret")
         XCTAssertTrue(f.store.isRefreshingSubscriptions)
         await settled(f)
-        XCTAssertEqual(f.backend.statsCount, 1)
+        XCTAssertEqual(f.backend.statsCount, 2)
         XCTAssertEqual(f.store.totalSubscriptionActualCost, 100)
         XCTAssertEqual(subscriptionMoney(f.store.totalSubscriptionCost, unit: f.store.configuration.subscriptionCostCurrency), "元200.00")
     }
@@ -96,7 +96,7 @@ final class SubscriptionMonitorTests: XCTestCase {
         XCTAssertEqual(f.store.eligibleSubscriptionIDs, [1])
         XCTAssertEqual(f.store.totalSubscriptionCost, 200)
         XCTAssertEqual(f.store.totalSubscriptionActualCost, 100)
-        XCTAssertEqual(f.backend.statsCount, 1)
+        XCTAssertEqual(f.backend.statsCount, 2)
         XCTAssertEqual(f.backend.usersCount, 0)
         XCTAssertEqual(f.backend.batchCount, 1)
         XCTAssertEqual(f.store.todayUsage[1], 12, "Standard-price today usage remains independent")
@@ -125,7 +125,7 @@ final class SubscriptionMonitorTests: XCTestCase {
         await f.tick(0); await settled(f)
         XCTAssertEqual(f.store.totalSubscriptionActualCost, 80)
         XCTAssertEqual(f.backend.usersCount, 1)
-        XCTAssertEqual(f.backend.statsCount, 3)
+        XCTAssertEqual(f.backend.statsCount, 6)
         XCTAssertEqual(f.backend.batchCount, 1)
         XCTAssertEqual(f.store.todayUsage[1], 12)
     }
@@ -166,10 +166,10 @@ final class SubscriptionMonitorTests: XCTestCase {
         try configure(f)
         await f.open(); await settled(f)
         await f.tick(2)
-        XCTAssertEqual(f.backend.statsCount, 1)
+        XCTAssertEqual(f.backend.statsCount, 2)
         f.backend.delayStats = 0.2; f.backend.actualCost = 150
         f.date = f.date.addingTimeInterval(28); f.store.runDueRefreshes()
-        await f.until { f.backend.statsCount == 2 }
+        await f.until { f.backend.statsCount == 3 }
         // The same tick starts a runtime request with the old concurrency.
         // Settle that lane before advancing its completion-based deadline.
         await f.until { !f.store.isRefreshing }
@@ -191,6 +191,7 @@ final class SubscriptionMonitorTests: XCTestCase {
         f.date = old.end
         XCTAssertNil(f.store.totalSubscriptionActualCost)
         f.backend.actualCost = 0
+        f.backend.todayActualCost = 0
         await f.tick(0); await settled(f)
         XCTAssertEqual(f.store.totalSubscriptionActualCost, 0)
         XCTAssertEqual(f.store.subscriptionSample(for: 1)?.cycle.start, old.end)

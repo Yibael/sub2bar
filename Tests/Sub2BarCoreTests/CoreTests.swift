@@ -40,6 +40,24 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(Configuration(accountRefreshInterval: .nan).effectiveAccountRefreshInterval, 2)
     }
 
+    func testStatisticsIntervalDefaultsAndMigrationAreIndependentOfQuota() throws {
+        XCTAssertEqual(Configuration().effectiveStatisticsRefreshInterval, 2)
+        XCTAssertEqual(Configuration().effectiveRefreshInterval, 30)
+        let legacy = Data(#"{"serverURL":"https://example.invalid","refreshInterval":60,"accountRefreshInterval":5}"#.utf8)
+        let restored = try JSONDecoder().decode(Configuration.self, from: legacy)
+        XCTAssertEqual(restored.effectiveStatisticsRefreshInterval, 2)
+        XCTAssertEqual(restored.refreshInterval, 60)
+        XCTAssertEqual(restored.accountRefreshInterval, 5)
+        for interval in Configuration.statisticsIntervals {
+            let config = Configuration(statisticsRefreshInterval: interval)
+            let value = try JSONDecoder().decode(Configuration.self, from: JSONEncoder().encode(config))
+            XCTAssertEqual(value.effectiveStatisticsRefreshInterval, interval)
+        }
+        for (input, expected) in [(0.0, 2.0), (3, 5), (300, 120), (.nan, 2), (.infinity, 2)] {
+            XCTAssertEqual(Configuration(statisticsRefreshInterval: input).effectiveStatisticsRefreshInterval, expected)
+        }
+    }
+
     func testURLNormalizationAndProxyPrefix() throws {
         for suffix in ["", "/", "/api/v1", "/api/v1/", "/api/v1/admin/"] {
             let config = Configuration(serverURL: " https://example.com/sub2api\(suffix) ")

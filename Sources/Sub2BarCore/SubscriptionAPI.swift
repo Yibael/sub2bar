@@ -4,7 +4,7 @@ extension APIClient {
     /// Aggregate user-billed actual_cost, not account cost or standard price.
     /// All endpoints in this path query sub2api's database; never /accounts/:id/usage.
     public func loadSubscriptionUsage(_ requests: [SubscriptionUsageRequest], includeAdmin: Bool,
-                                      at date: Date) async throws -> [SubscriptionUsageResult] {
+                                      at date: Date, includeToday: Bool = false) async throws -> [SubscriptionUsageResult] {
         guard !requests.isEmpty else { return [] }
         var seen = Set<Int>()
         guard requests.allSatisfy({ $0.accountID > 0 && seen.insert($0.accountID).inserted &&
@@ -14,21 +14,32 @@ extension APIClient {
             var iterator = requests.makeIterator()
             func enqueue(_ request: SubscriptionUsageRequest) {
                 group.addTask {
-                    do {
-                        // Read the admin subtotals first, then the total. These
-                        // are near-real-time aggregates, not an atomic snapshot.
-                        var excluded = Decimal.zero
-                        for id in adminIDs {
-                            excluded += try await self.subscriptionActualCost(request, userID: id, at: date)
+                    func readCost(today: Bool) async throws -> (cost: Decimal?, error: String?) {
+                        do {
+                            // Read the admin subtotals first, then the total.
+                            // These are not an atomic database snapshot.
+                            var excluded = Decimal.zero
+                            for id in adminIDs {
+                                excluded += try await self.subscriptionActualCost(request, userID: id, at: date, today: today)
+                            }
+                            let total = try await self.subscriptionActualCost(request, userID: nil, at: date, today: today)
+                            guard !excluded.isNaN, total >= excluded else { throw SubscriptionError.invalidStatistics }
+                            return (total - excluded, nil)
+                        } catch is CancellationError { throw CancellationError() }
+                        catch {
+                            if let error = error as? APIError, error == .http(401) || error == .http(403) { throw error }
+                            return (nil, today ? "今日实际消费读取失败" : "订阅消费读取失败")
                         }
-                        let total = try await self.subscriptionActualCost(request, userID: nil, at: date)
-                        guard !excluded.isNaN, total >= excluded else { throw SubscriptionError.invalidStatistics }
-                        return SubscriptionUsageResult(request: request, actualCost: total - excluded, error: nil)
-                    } catch is CancellationError { throw CancellationError() }
-                    catch {
-                        if let error = error as? APIError, error == .http(401) || error == .http(403) { throw error }
-                        return SubscriptionUsageResult(request: request, actualCost: nil, error: "订阅消费读取失败")
                     }
+                    let cycle = try await readCost(today: false)
+                    // On renewal day these date ranges are identical, so reuse
+                    // the same result instead of querying the database twice.
+                    let today: (cost: Decimal?, error: String?)
+                    if !includeToday { today = (nil, nil) }
+                    else if request.cycle.dateString(request.cycle.start) == request.cycle.dateString(date) { today = cycle }
+                    else { today = try await readCost(today: true) }
+                    return SubscriptionUsageResult(request: request, actualCost: cycle.cost, error: cycle.error,
+                        todayActualCost: today.cost, todayError: today.error)
                 }
             }
             for _ in 0..<4 { if let request = iterator.next() { enqueue(request) } }
@@ -42,10 +53,10 @@ extension APIClient {
         }
     }
 
-    private func subscriptionActualCost(_ request: SubscriptionUsageRequest, userID: Int?, at date: Date) async throws -> Decimal {
+    private func subscriptionActualCost(_ request: SubscriptionUsageRequest, userID: Int?, at date: Date, today: Bool) async throws -> Decimal {
         struct Stats: Decodable { let totalActualCost: Decimal }
         var query = [URLQueryItem(name: "account_id", value: String(request.accountID)),
-                     URLQueryItem(name: "start_date", value: request.cycle.dateString(request.cycle.start)),
+                     URLQueryItem(name: "start_date", value: request.cycle.dateString(today ? date : request.cycle.start)),
                      URLQueryItem(name: "end_date", value: request.cycle.dateString(min(date, request.cycle.lastIncludedDate))),
                      URLQueryItem(name: "timezone", value: request.cycle.timeZoneID),
                      URLQueryItem(name: "nocache", value: "true")]

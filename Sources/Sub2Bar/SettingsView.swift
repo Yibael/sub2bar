@@ -33,6 +33,7 @@ struct SettingsView: View {
         var initial = store.configuration
         initial.refreshInterval = initial.effectiveRefreshInterval
         initial.accountRefreshInterval = initial.effectiveAccountRefreshInterval
+        initial.statisticsRefreshInterval = initial.effectiveStatisticsRefreshInterval
         _draft = State(initialValue: initial)
     }
 
@@ -53,8 +54,10 @@ struct SettingsView: View {
             }.frame(width: 172).background(Color(nsColor: .windowBackgroundColor))
             Divider()
             VStack(alignment: .leading, spacing: 0) {
-                Text(page.rawValue).font(.system(size: 22, weight: .bold))
-                    .padding(.horizontal, 28).padding(.top, 26).padding(.bottom, 8)
+                if page != .accounts {
+                    Text(page.rawValue).font(.system(size: 22, weight: .bold))
+                        .padding(.horizontal, 28).padding(.top, 26).padding(.bottom, 8)
+                }
                 Group {
                     switch page {
                     case .connection: connectionForm
@@ -67,13 +70,13 @@ struct SettingsView: View {
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             PinnedAccountsView(store: store, configure: { page = .connection })
-                        }.padding(.horizontal, 28).padding(.vertical, 16)
+                        }.padding(.horizontal, 28).padding(.top, 26).padding(.bottom, 18)
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
                 HStack(spacing: 12) {
                     if store.isSaving { ProgressView().controlSize(.small) }
-                    Text(message ?? (changed ? "有未保存的更改" : ""))
+                    Text(message ?? (changed ? "有未保存的更改" : (page == .accounts ? "Pin 与订阅更改自动保存" : "")))
                         .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                     Spacer(minLength: 8)
                     Button("保存设置", action: save)
@@ -103,6 +106,7 @@ struct SettingsView: View {
         }
         .onChange(of: draft.refreshInterval) { _, _ in message = nil }
         .onChange(of: draft.accountRefreshInterval) { _, _ in message = nil }
+        .onChange(of: draft.statisticsRefreshInterval) { _, _ in message = nil }
         .onChange(of: draft.includeAdminUsage) { _, _ in message = nil }
         .onChange(of: draft.subscriptionTimeZoneID) { _, _ in message = nil }
         .onChange(of: draft.actualCostCurrency) { _, _ in message = nil }
@@ -164,6 +168,17 @@ struct SettingsView: View {
             footer: { Text("一起更新使用比例、重置时间、窗口费用和周额度估算。使用普通查询，不强制刷新上游；sub2api 仍可能按需查询上游。") }
 
             Section {
+                Picker("实际消费刷新间隔", selection: $draft.statisticsRefreshInterval) {
+                    ForEach(Configuration.statisticsIntervals, id: \.self) { interval in
+                        Text("\(Int(interval)) 秒").tag(interval)
+                    }
+                }
+            } header: { Text("实际消费 · 仅本地数据库") }
+            footer: {
+                Text("更新今日与周期实际消费，仅查询 sub2api 使用日志统计，不访问 OpenAI 等上游。独立于账号状态及额度刷新；账号较多或排除 Admin 时查询次数较多，可适当增大间隔。")
+            }
+
+            Section {
                 Text("仅面板打开时自动刷新。请求完成后重新计时，失败时延后重试。点击刷新按钮可立即查询一次额度，但不强制刷新上游缓存。保存刷新间隔会保留已有数据。")
                     .font(.callout).foregroundStyle(.secondary)
             }
@@ -183,9 +198,9 @@ struct SettingsView: View {
             }
             Section {
                 Toggle("将 Admin 消费纳入统计", isOn: $draft.includeAdminUsage).toggleStyle(.switch)
-            } header: { Text("订阅周期实际消费") }
+            } header: { Text("今日与周期实际消费") }
             footer: {
-                Text("实际消费使用用户扣费金额 actual_cost（含倍率）。关闭后排除当前角色为 Admin 的用户消费；不影响今日标准价用量、周额度统计或订阅成本。")
+                Text("今日与周期实际消费均使用用户扣费金额 actual_cost（含倍率）。关闭后排除当前角色为 Admin 的用户消费；不影响账号卡片的今日标准价用量、周额度统计或订阅成本。")
             }
             Section {
                 Picker("统计时区", selection: $draft.subscriptionTimeZoneID) {
@@ -193,13 +208,13 @@ struct SettingsView: View {
                         Text(id).tag(id)
                     }
                 }
-            } header: { Text("周期边界") }
+            } header: { Text("日期与周期边界") }
             footer: {
-                Text("以此时区每月续费日 00:00 划分周期，包含续费日至下月续费日前一天，例如 9 月 15 日至 10 月 14 日。短月取月末，之后恢复原续费日。默认使用当前 Mac 时区，可改成账单所在时区；按日统计，不代表精确扣款时刻。")
+                Text("今日实际消费从此时区今日 00:00 起统计。每月续费日 00:00 划分周期，包含续费日至下月续费日前一天，例如 9 月 15 日至 10 月 14 日。短月取月末，之后恢复原续费日。按日统计，不代表精确扣款时刻。")
             }
             Section {
                 Text("在“账号管理”中为 OAuth 账号填写月订阅价格和每月续费日。只有已 Pin 且配置完整的账号参与消费与成本汇总。")
-                Text("价格、续费日和统计设置仅保存在当前 Mac，不写入 sub2api。订阅消费每 30 秒刷新，失败退避；关闭面板停止请求。")
+                Text("价格、续费日和统计设置仅保存在当前 Mac，不写入 sub2api。实际消费刷新间隔在“刷新”中独立配置，默认 2 秒；失败退避，关闭面板停止请求。")
             }.font(.callout).foregroundStyle(.secondary)
         }.formStyle(.grouped).disabled(busy)
     }

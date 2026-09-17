@@ -32,6 +32,8 @@ final class AppStore: ObservableObject {
     @Published private(set) var subscriptions: [Int: AccountSubscription] = [:]
     @Published private(set) var subscriptionUsage: [Int: SubscriptionUsageSample] = [:]
     @Published private(set) var subscriptionErrors: [Int: String] = [:]
+    @Published private(set) var todayActualUsage: [Int: TodayActualUsageSample] = [:]
+    @Published private(set) var todayActualErrors: [Int: String] = [:]
     @Published private(set) var isRefreshingSubscriptions = false
     @Published private(set) var nextSubscriptionAt: Date?
     @Published private(set) var availableAccounts: [Account] = []
@@ -65,7 +67,9 @@ final class AppStore: ObservableObject {
     private var subscriptionTask: Task<Void, Never>?
     private var subscriptionGeneration = UUID()
     private var subscriptionFailures = 0
-    private static let subscriptionInterval: Double = 30
+    private var subscriptionCompletedAt: Date?
+    private var subscriptionRetryNotBefore: Date?
+    private var runtimeCompletedAt: Date?
     private var latestAccounts: [Int: Account] = [:]
     private var batchUsageSupported = true
     private var manualQuotaRefreshPending = false
@@ -191,6 +195,21 @@ final class AppStore: ObservableObject {
         guard costs.count == ids.count else { return nil }
         return costs.reduce(0, +)
     }
+    var totalTodayActualCost: Decimal? {
+        let ids = eligibleSubscriptionIDs
+        guard !ids.isEmpty else { return nil }
+        let costs = ids.compactMap { todayActualSample(for: $0)?.actualCost }
+        guard costs.count == ids.count else { return nil }
+        return costs.reduce(0, +)
+    }
+    func todayActualSample(for id: Int) -> TodayActualUsageSample? {
+        guard eligibleSubscriptionIDs.contains(id), pinnedAccountErrors[id] == nil,
+              todayActualErrors[id] == nil, let sample = todayActualUsage[id],
+              let cycle = subscriptionCycle(for: id), sample.day == cycle.dateString(now()),
+              sample.timeZoneID == configuration.subscriptionTimeZoneID,
+              sample.includesAdmin == configuration.includeAdminUsage else { return nil }
+        return sample
+    }
     func subscriptionCycle(for id: Int) -> SubscriptionCycle? {
         guard let value = subscriptions[id], value.isComplete, let day = value.renewalDay else { return nil }
         return SubscriptionCycle(renewalDay: day, at: now(), timeZoneID: configuration.subscriptionTimeZoneID)
@@ -217,7 +236,9 @@ final class AppStore: ObservableObject {
         subscriptionPreferences = saved; restoreSubscriptions()
         cancelSubscriptionPolling()
         subscriptionUsage[account.id] = nil; subscriptionErrors[account.id] = nil
+        todayActualUsage[account.id] = nil; todayActualErrors[account.id] = nil
         nextSubscriptionAt = now(); subscriptionFailures = 0
+        subscriptionCompletedAt = nil; subscriptionRetryNotBefore = nil
         if canPoll { runDueRefreshes() }
     }
     func cachedKey(for config: Configuration? = nil) -> String? {
@@ -255,15 +276,30 @@ final class AppStore: ObservableObject {
         saved.subscriptionCostCurrency = try CurrencyUnit.normalized(draft.subscriptionCostCurrency)
         saved.serverURL = base.absoluteString; saved.refreshInterval = draft.effectiveRefreshInterval
         saved.accountRefreshInterval = draft.effectiveAccountRefreshInterval
+        saved.statisticsRefreshInterval = draft.effectiveStatisticsRefreshInterval
         let data = try JSONEncoder().encode(saved)
         if sameConnection {
-            var displayOnly = configuration
-            displayOnly.actualCostCurrency = saved.actualCostCurrency
-            displayOnly.subscriptionCostCurrency = saved.subscriptionCostCurrency
-            if displayOnly == saved {
-                // Units are display labels, not a data/statistics scope change.
-                // Keep amounts, in-flight requests and all polling deadlines.
+            var localOnly = configuration
+            localOnly.actualCostCurrency = saved.actualCostCurrency
+            localOnly.subscriptionCostCurrency = saved.subscriptionCostCurrency
+            localOnly.refreshInterval = saved.refreshInterval
+            localOnly.accountRefreshInterval = saved.accountRefreshInterval
+            localOnly.statisticsRefreshInterval = saved.statisticsRefreshInterval
+            if localOnly == saved {
+                // Independent timing/display edits preserve all running work,
+                // cached amounts, and the untouched lanes' deadlines.
+                let quotaChanged = configuration.refreshInterval != saved.refreshInterval
+                let runtimeChanged = configuration.accountRefreshInterval != saved.accountRefreshInterval
+                let statisticsChanged = configuration.statisticsRefreshInterval != saved.statisticsRefreshInterval
                 configuration = saved; defaults.set(data, forKey: defaultsKey)
+                if quotaChanged { updateQuotaDeadline() }
+                if runtimeChanged, canPoll, !isRefreshing {
+                    nextRuntimeAt = (runtimeCompletedAt ?? now()).addingTimeInterval(runtimeDelay)
+                }
+                if statisticsChanged, canPoll, subscriptionTask == nil {
+                    nextSubscriptionAt = subscriptionDeadline
+                }
+                if quotaChanged || runtimeChanged || statisticsChanged { scheduleWake() }
                 return
             }
         }
@@ -278,7 +314,11 @@ final class AppStore: ObservableObject {
             // account directory. Save never dispatches a connection request.
             cancelPolling()
             configuration = saved; defaults.set(data, forKey: defaultsKey)
-            if statisticsChanged { subscriptionUsage = [:]; subscriptionErrors = [:]; subscriptionFailures = 0 }
+            if statisticsChanged {
+                subscriptionUsage = [:]; subscriptionErrors = [:]; subscriptionFailures = 0
+                todayActualUsage = [:]; todayActualErrors = [:]
+                subscriptionCompletedAt = nil; subscriptionRetryNotBefore = nil
+            }
             if wasPolling {
                 nextRuntimeAt = now().addingTimeInterval(runtimeDelay)
                 nextSubscriptionAt = now()
@@ -292,6 +332,8 @@ final class AppStore: ObservableObject {
         restorePins()
         restoreSubscriptions()
         subscriptionUsage = [:]; subscriptionErrors = [:]; subscriptionFailures = 0
+        todayActualUsage = [:]; todayActualErrors = [:]
+        subscriptionCompletedAt = nil; subscriptionRetryNotBefore = nil; runtimeCompletedAt = nil
         snapshots = []; latestAccounts = [:]; pinnedAccountErrors = [:]
         todayUsage = [:]; todayUsageErrors = [:]
         availableAccounts = []; hasLoadedAccounts = false; accountsError = nil; accountsUpdatedAt = nil
@@ -322,6 +364,8 @@ final class AppStore: ObservableObject {
         todayUsageErrors = todayUsageErrors.filter { pinnedIDs.contains($0.key) }
         subscriptionUsage = subscriptionUsage.filter { pinnedIDs.contains($0.key) }
         subscriptionErrors = subscriptionErrors.filter { pinnedIDs.contains($0.key) }
+        todayActualUsage = todayActualUsage.filter { pinnedIDs.contains($0.key) }
+        todayActualErrors = todayActualErrors.filter { pinnedIDs.contains($0.key) }
         if !platforms.contains(platform) { platform = "全部" }
         refresh()
     }
@@ -438,7 +482,8 @@ final class AppStore: ObservableObject {
             defer {
                 if generation == token {
                     isRefreshing = false; runtimeTask = nil
-                    nextRuntimeAt = now().addingTimeInterval(runtimeDelay)
+                    runtimeCompletedAt = now()
+                    nextRuntimeAt = runtimeCompletedAt?.addingTimeInterval(runtimeDelay)
                     runDueRefreshes()
                 }
             }
@@ -594,6 +639,13 @@ final class AppStore: ObservableObject {
             return SubscriptionUsageRequest(accountID: id, cycle: cycle)
         }
     }
+    private var subscriptionDelay: TimeInterval {
+        min(600, configuration.effectiveStatisticsRefreshInterval * pow(2, Double(subscriptionFailures)))
+    }
+    private var subscriptionDeadline: Date {
+        guard let completed = subscriptionCompletedAt else { return now() }
+        return max(completed.addingTimeInterval(subscriptionDelay), subscriptionRetryNotBefore ?? .distantPast)
+    }
     private func refreshSubscriptions() {
         guard canPoll, subscriptionTask == nil else { return }
         let requests = subscriptionRequests
@@ -604,18 +656,21 @@ final class AppStore: ObservableObject {
             defer {
                 if token == subscriptionGeneration {
                     subscriptionTask = nil; isRefreshingSubscriptions = false
-                    nextSubscriptionAt = now().addingTimeInterval(min(600, Self.subscriptionInterval * pow(2, Double(subscriptionFailures))))
+                    subscriptionCompletedAt = now()
+                    subscriptionRetryNotBefore = subscriptionFailures > 0 ? now().addingTimeInterval(subscriptionDelay) : nil
+                    nextSubscriptionAt = subscriptionDeadline
                     scheduleWake()
                 }
             }
             do {
-                let results = try await client(for: config).loadSubscriptionUsage(requests, includeAdmin: config.includeAdminUsage, at: date)
+                let results = try await client(for: config).loadSubscriptionUsage(requests, includeAdmin: config.includeAdminUsage, at: date, includeToday: true)
                 guard token == subscriptionGeneration, !Task.isCancelled, canPoll else { return }
-                subscriptionFailures = results.contains { $0.error != nil } ? min(subscriptionFailures + 1, 5) : 0
+                subscriptionFailures = results.contains { $0.error != nil || $0.todayError != nil } ? min(subscriptionFailures + 1, 5) : 0
                 for result in results {
                     let id = result.request.accountID
                     guard eligibleSubscriptionIDs.contains(id), result.request.cycle == subscriptionCycle(for: id) else {
                         subscriptionUsage[id] = nil
+                        todayActualUsage[id] = nil
                         continue
                     }
                     if let cost = result.actualCost {
@@ -625,6 +680,16 @@ final class AppStore: ObservableObject {
                     } else {
                         subscriptionUsage[id] = nil; subscriptionErrors[id] = result.error ?? "订阅消费读取失败"
                     }
+                    if result.request.cycle.dateString(date) != result.request.cycle.dateString(now()) {
+                        todayActualUsage[id] = nil
+                    } else if let cost = result.todayActualCost {
+                        todayActualUsage[id] = TodayActualUsageSample(day: result.request.cycle.dateString(date),
+                            timeZoneID: config.subscriptionTimeZoneID, actualCost: cost,
+                            includesAdmin: config.includeAdminUsage, sampledAt: now())
+                        todayActualErrors[id] = nil
+                    } else {
+                        todayActualUsage[id] = nil; todayActualErrors[id] = result.todayError ?? "今日实际消费读取失败"
+                    }
                 }
             } catch {
                 guard token == subscriptionGeneration, !Task.isCancelled else { return }
@@ -632,6 +697,8 @@ final class AppStore: ObservableObject {
                 for request in requests {
                     subscriptionUsage[request.accountID] = nil
                     subscriptionErrors[request.accountID] = "订阅消费读取失败，请检查统计接口及 Admin 用户权限。"
+                    todayActualUsage[request.accountID] = nil
+                    todayActualErrors[request.accountID] = "今日实际消费读取失败，请检查统计接口及 Admin 用户权限。"
                 }
                 handleAuthenticationFailure(error)
             }

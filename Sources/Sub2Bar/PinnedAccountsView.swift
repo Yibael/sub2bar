@@ -9,37 +9,14 @@ struct PinnedAccountsView: View {
     @State private var onlyOAuth = false
     @State private var editingAccount: Account?
 
-    private var filtered: [Account] {
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        return store.orderedAvailableAccounts.filter {
-            (!onlyPinned || store.isPinned($0.id)) && (!onlyOAuth || $0.supportsSubscription) &&
-            (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) ||
-            $0.platformLabel.localizedCaseInsensitiveContains(query) || String($0.id).contains(query))
-        }
-    }
-    private var missingPins: [Int] {
-        guard store.hasLoadedAccounts else { return [] }
-        let known = Set(store.availableAccounts.map(\.id))
-        return store.pinnedIDs.filter { !known.contains($0) }
+    private var directory: AccountDirectoryPresentation {
+        AccountDirectoryPresentation(accounts: store.availableAccounts, pinnedIDs: store.pinnedIDs,
+            hasLoaded: store.hasLoadedAccounts, search: search, onlyPinned: onlyPinned, onlyOAuth: onlyOAuth)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("账号").font(.system(size: 14, weight: .semibold))
-                    Text("\(store.hostLabel) · \(store.pinCount) 个已 Pin")
-                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                }
-                Spacer()
-                if store.isLoadingAccounts { ProgressView().controlSize(.small) }
-                Button(store.hasLoadedAccounts ? "刷新全部账号" : "获取全部账号") { store.loadAvailableAccounts() }
-                    .buttonStyle(.bordered)
-                    .disabled(store.isLoadingAccounts || !store.isConfigured || store.isSaving)
-            }
-            Text("已 Pin 账号按切换顺序排列，可用上下箭头调整。只有 Pin 的账号参与面板切换；订阅统计仍要求价格与续费日完整。")
-                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-
+        VStack(alignment: .leading, spacing: 18) {
+            header
             if !store.isConfigured {
                 Spacer()
                 VStack(spacing: 12) {
@@ -49,55 +26,14 @@ struct PinnedAccountsView: View {
                 }.frame(maxWidth: .infinity)
                 Spacer()
             } else {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("搜索账号名称、平台或 ID", text: $search).textFieldStyle(.plain)
-                }.font(.system(size: 12)).padding(10).insetSurface(cornerRadius: 7)
-                HStack(spacing: 18) {
-                    Toggle("仅已 Pin", isOn: $onlyPinned)
-                    Toggle("仅 OAuth", isOn: $onlyOAuth)
-                }.toggleStyle(.checkbox).font(.system(size: 11))
-
+                toolbar
                 if let error = store.accountsError {
                     Label(error + (store.hasLoadedAccounts ? " 显示上次列表。" : ""), systemImage: "exclamationmark.circle")
                         .font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
+                        .padding(10).frame(maxWidth: .infinity, alignment: .leading).insetSurface(cornerRadius: 8)
                 }
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(filtered) { account in
-                            accountRow(account)
-                            Divider()
-                        }
-                        if !missingPins.isEmpty {
-                            Text("列表中缺失的 Pin")
-                                .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 13)
-                            ForEach(missingPins, id: \.self) { id in
-                                HStack {
-                                    Label("账号 #\(id)", systemImage: "exclamationmark.circle")
-                                    Spacer()
-                                    pinOrderControls(id)
-                                    Button("取消 Pin") { store.setPinned(false, id: id) }
-                                        .buttonStyle(NeutralButtonStyle(.outline))
-                                }.font(.system(size: 12)).padding(.vertical, 6)
-                            }
-                        }
-                        if filtered.isEmpty && missingPins.isEmpty {
-                            Text(emptyLabel).font(.system(size: 12)).foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity).padding(.vertical, 48)
-                        }
-                    }
-                }.frame(maxHeight: .infinity)
-
-                HStack {
-                    Text(store.hasLoadedAccounts ? "共 \(store.availableAccounts.count) 个账号 · \(store.pinCount) 个已 Pin" : "账号列表尚未加载")
-                    Spacer()
-                    Text("顺序与配置保存本地")
-                }.font(.system(size: 10)).foregroundStyle(.secondary)
-                if let date = store.accountsUpdatedAt {
-                    Text("列表更新于 \(date.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.system(size: 10)).foregroundStyle(.tertiary)
-                }
+                accountList
+                footer
             }
         }
         .sheet(item: $editingAccount) { account in
@@ -107,66 +43,264 @@ struct PinnedAccountsView: View {
         .task(id: store.accountDirectoryIdentity) { store.loadAvailableAccountsIfNeeded() }
     }
 
+    private var header: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("账号管理").font(.system(size: 22, weight: .bold))
+                Text("管理切换顺序与账号订阅")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Button { store.loadAvailableAccounts() } label: {
+                HStack(spacing: 6) {
+                    ZStack {
+                        if store.isLoadingAccounts { ProgressView().controlSize(.mini) }
+                        else { Image(systemName: "arrow.clockwise") }
+                    }.frame(width: 12, height: 12)
+                    Text(store.isLoadingAccounts ? "刷新中" : "刷新账号")
+                }
+            }
+            .buttonStyle(.bordered).controlSize(.small)
+            .disabled(store.isLoadingAccounts || !store.isConfigured || store.isSaving)
+            .help("立即刷新完整账号列表")
+        }
+    }
+
+    private var toolbar: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("搜索名称、平台或 ID", text: $search).textFieldStyle(.plain)
+                    .accessibilityLabel("搜索账号")
+                if !search.isEmpty {
+                    Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .help("清除搜索").accessibilityLabel("清除账号搜索")
+                }
+            }.font(.system(size: 12)).padding(.horizontal, 10).frame(height: 34).insetSurface(cornerRadius: 8)
+            HStack(spacing: 10) {
+                Picker("账号范围", selection: $onlyPinned) {
+                    Text(store.hasLoadedAccounts ? "全部 \(store.availableAccounts.count)" : "全部").tag(false)
+                    Text("已 Pin \(store.pinCount)").tag(true)
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 176)
+                Toggle("仅 OAuth", isOn: $onlyOAuth)
+                    .toggleStyle(.checkbox).font(.system(size: 11))
+                Spacer(minLength: 0)
+                Text(store.hostLabel).font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.middle).help(store.hostLabel)
+            }
+        }
+    }
+
+    private var accountList: some View {
+        let content = directory
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                if !content.pinned.isEmpty {
+                    accountSection("面板切换", accounts: content.pinned, pinned: true)
+                }
+                if !content.others.isEmpty {
+                    accountSection("其他账号", accounts: content.others, pinned: false)
+                }
+                if !content.missingPinnedIDs.isEmpty {
+                    missingSection(content.missingPinnedIDs)
+                }
+                if content.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "person.crop.rectangle.stack").font(.system(size: 24))
+                        Text(emptyLabel).font(.system(size: 12))
+                    }.foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.vertical, 52)
+                }
+            }.padding(1)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func accountSection(_ title: String, accounts: [Account], pinned: Bool) -> some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Text(title).fontWeight(.medium)
+                Text("\(accounts.count)").monospacedDigit().foregroundStyle(.tertiary)
+                if pinned {
+                    Image(systemName: "info.circle").foregroundStyle(.tertiary)
+                        .help("已 Pin 账号按顺序在面板中切换。使用上下箭头调整顺序；订阅价格与续费日完整时纳入统计。")
+                        .accessibilityLabel("已 Pin 账号按顺序切换，使用上下箭头调整")
+                }
+                Spacer()
+                Text("月订阅").foregroundStyle(.tertiary)
+                    .frame(width: 126, alignment: .leading)
+                Image(systemName: "pin").foregroundStyle(.tertiary).frame(width: 28)
+            }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 12)
+            LazyVStack(spacing: 0) {
+                ForEach(accounts) { account in
+                    accountRow(account)
+                    if account.id != accounts.last?.id {
+                        Divider().padding(.leading, 12).padding(.trailing, 12)
+                    }
+                }
+            }
+            .background(pinned ? Color.accentColor.opacity(0.025) : .clear)
+            .insetSurface(cornerRadius: 10)
+        }
+    }
+
+    private func missingSection(_ ids: [Int]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("列表中缺失的 Pin", systemImage: "exclamationmark.circle")
+                .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+            ForEach(ids, id: \.self) { id in
+                HStack(spacing: 10) {
+                    pinOrderControls(id)
+                    Text("账号 #\(id)").font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    Button("取消 Pin") { store.setPinned(false, id: id) }
+                        .buttonStyle(.bordered).controlSize(.small)
+                }.padding(10).insetSurface(cornerRadius: 8)
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            if let date = store.accountsUpdatedAt {
+                Text("更新于 \(date.formatted(date: .omitted, time: .shortened))")
+                    .help("列表更新于 \(date.formatted(date: .abbreviated, time: .shortened))")
+            } else { Text("账号列表尚未加载") }
+            Spacer()
+            Label("配置仅保存在本地", systemImage: "internaldrive")
+        }.font(.system(size: 10)).foregroundStyle(.tertiary)
+    }
+
     private var emptyLabel: String {
         if store.isLoadingAccounts { return "正在获取全部账号…" }
         if store.needsCredentialAccess { return "请先在连接设置中配置有效密钥" }
-        if !store.hasLoadedAccounts { return "点击“获取全部账号”重试" }
+        if !store.hasLoadedAccounts { return "点击“刷新账号”重试" }
         return store.availableAccounts.isEmpty ? "服务器中暂无账号" : "没有匹配的账号"
     }
 
     private func accountRow(_ account: Account) -> some View {
-        HStack(spacing: 12) {
-            ProviderIcon(platform: account.platform)
-                .frame(width: 30, height: 30).insetSurface(cornerRadius: 6)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(account.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                Text("\(account.platformLabel) · #\(account.id) · \(account.stateLabel(at: Date()))")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
-                if account.supportsSubscription {
-                    Text(subscriptionLabel(account.id)).font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-            }
-            Spacer(minLength: 8)
-            if account.supportsSubscription {
-                Button { editingAccount = account } label: { Image(systemName: "slider.horizontal.3") }
-                    .buttonStyle(NeutralButtonStyle(.ghost, compact: true))
-                    .help("设置月订阅价格与续费日")
-                    .accessibilityLabel("配置 \(account.name) 的订阅")
-            }
+        HStack(spacing: 10) {
             if store.isPinned(account.id) {
                 pinOrderControls(account.id)
-                Button { store.setPinned(false, id: account.id) } label: { Image(systemName: "pin.slash") }
-                    .buttonStyle(NeutralButtonStyle(.ghost, compact: true))
-                    .help("移出切换列表（取消 Pin）")
-                    .accessibilityLabel("取消 Pin \(account.name)")
-            } else {
-                Button { store.setPinned(true, id: account.id) } label: {
-                    Label("加入切换", systemImage: "pin")
-                }.buttonStyle(NeutralButtonStyle(.outline))
-                    .accessibilityLabel("Pin \(account.name)，加入切换列表")
             }
-        }.padding(.vertical, 12)
+            AccountDirectoryIdentity(account: account)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            subscriptionCell(account).frame(width: 126, alignment: .leading)
+            Button { store.setPinned(!store.isPinned(account.id), id: account.id) } label: {
+                Image(systemName: store.isPinned(account.id) ? "pin.fill" : "pin")
+                    .font(.system(size: 12, weight: .medium)).frame(width: 28, height: 28)
+            }.buttonStyle(AccountDirectoryActionStyle(selected: store.isPinned(account.id)))
+                .help(store.isPinned(account.id) ? "移出切换列表（取消 Pin）" : "加入面板切换（Pin）")
+                .accessibilityLabel(store.isPinned(account.id) ? "取消 Pin \(account.name)" : "Pin \(account.name)，加入切换列表")
+        }.padding(.horizontal, 12).padding(.vertical, 12)
+            .accessibilityElement(children: .contain)
     }
 
     private func pinOrderControls(_ id: Int) -> some View {
         let index = store.pinnedIDs.firstIndex(of: id) ?? 0
-        return HStack(spacing: 5) {
-            Text("\(index + 1)").font(.system(size: 12, weight: .medium)).monospacedDigit()
-                .frame(minWidth: 18).help("切换顺序 \(index + 1)")
-            VStack(spacing: 2) {
-                Button { store.movePinned(id, by: -1) } label: { Image(systemName: "chevron.up").frame(width: 18, height: 14) }
+        return HStack(spacing: 1) {
+            Text("\(index + 1)").font(.system(size: 10, weight: .medium)).monospacedDigit()
+                .foregroundStyle(.secondary).frame(minWidth: 12).help("切换顺序 \(index + 1)")
+            VStack(spacing: 0) {
+                Button { store.movePinned(id, by: -1) } label: { Image(systemName: "chevron.up").frame(width: 18, height: 18) }
                     .disabled(index == 0).accessibilityLabel("账号 #\(id) 切换顺序上移")
-                Button { store.movePinned(id, by: 1) } label: { Image(systemName: "chevron.down").frame(width: 18, height: 14) }
+                    .help("切换顺序上移")
+                Button { store.movePinned(id, by: 1) } label: { Image(systemName: "chevron.down").frame(width: 18, height: 18) }
                     .disabled(index == store.pinCount - 1).accessibilityLabel("账号 #\(id) 切换顺序下移")
-            }.buttonStyle(.plain).font(.system(size: 9, weight: .semibold))
-        }.padding(.horizontal, 6).padding(.vertical, 4).insetSurface(cornerRadius: 5)
+                    .help("切换顺序下移")
+            }.buttonStyle(.borderless).font(.system(size: 8, weight: .semibold))
+        }.fixedSize()
             .accessibilityElement(children: .contain)
     }
 
-    private func subscriptionLabel(_ id: Int) -> String {
-        guard let value = store.subscriptions[id] else { return "订阅未配置 · 不参与统计" }
-        guard value.isComplete, let day = value.renewalDay else { return "订阅配置未完整 · 不参与统计" }
-        return "\(subscriptionMoney(value.monthlyPrice, unit: store.configuration.subscriptionCostCurrency))/月 · 每月 \(day) 日续费"
+    @ViewBuilder
+    private func subscriptionCell(_ account: Account) -> some View {
+        if account.supportsSubscription {
+            let value = store.subscriptions[account.id]
+            Button { editingAccount = account } label: {
+                HStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        if let value, value.isComplete, let day = value.renewalDay {
+                            Text(subscriptionMoney(value.monthlyPrice, unit: store.configuration.subscriptionCostCurrency) + " / 月")
+                                .font(.system(size: 11, weight: .medium)).foregroundStyle(.primary)
+                            Text("每月 \(day) 日续费").font(.system(size: 10)).foregroundStyle(.secondary)
+                        } else {
+                            Text(value == nil ? "设置订阅" : "补全订阅")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                    }.lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    Image(systemName: "pencil").font(.system(size: 10)).foregroundStyle(.tertiary)
+                }.padding(.horizontal, 5).frame(height: 42)
+            }.buttonStyle(AccountDirectoryActionStyle())
+                .help(subscriptionHelp(account.id))
+                .accessibilityLabel("配置 \(account.name) 的订阅：\(subscriptionHelp(account.id))")
+        } else {
+            Text("—").font(.system(size: 11)).foregroundStyle(.tertiary).padding(.leading, 5)
+                .help("仅 OAuth 账号支持订阅配置")
+        }
+    }
+
+    private func subscriptionHelp(_ id: Int) -> String {
+        guard let value = store.subscriptions[id], value.isComplete, let day = value.renewalDay else {
+            return "设置月订阅价格与续费日；配置完整的 Pin 账号才纳入统计"
+        }
+        return "\(subscriptionMoney(value.monthlyPrice, unit: store.configuration.subscriptionCostCurrency)) / 月，每月 \(day) 日续费；点击编辑"
+    }
+}
+
+private struct AccountDirectoryIdentity: View {
+    let account: Account
+
+    private var typeLabel: String {
+        switch account.type {
+        case "oauth": return "OAuth"
+        case "apikey", "api_key", "api-key": return "API Key"
+        case "setup-token": return "Setup Token"
+        default: return account.type ?? "类型未知"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ProviderIcon(platform: account.platform).frame(width: 28, height: 28)
+                .padding(3).insetSurface(cornerRadius: 8)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(account.name).font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.primary).lineLimit(1).truncationMode(.middle).help(account.name)
+                Text("\(account.platformLabel) · \(typeLabel) · #\(account.id)")
+                    .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                HStack(spacing: 4) {
+                    Circle().fill(account.isAvailable ? Color.green : Color.secondary).frame(width: 4, height: 4)
+                    Text(account.stateLabel(at: Date()))
+                }.font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+    }
+}
+
+private struct AccountDirectoryActionStyle: ButtonStyle {
+    var selected = false
+
+    func makeBody(configuration: ButtonStyleConfiguration) -> some View {
+        AccountDirectoryActionSurface(selected: selected, pressed: configuration.isPressed, content: configuration.label)
+    }
+}
+
+private struct AccountDirectoryActionSurface<Content: View>: View {
+    let selected: Bool
+    let pressed: Bool
+    let content: Content
+    @State private var hovered = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        content
+            .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+            .background(selected ? Color.accentColor.opacity(pressed ? 0.2 : 0.09) : Color.primary.opacity(pressed ? 0.09 : (hovered ? 0.045 : 0)),
+                        in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .opacity(isEnabled ? 1 : 0.4)
+            .onHover { hovered = $0 }
     }
 }
 
