@@ -13,10 +13,16 @@ enum PanelSizing {
     static let width: CGFloat = 432
     static let initialHeight: CGFloat = 660
     static let placeholderHeight: CGFloat = 360
+    static let accountCardHeight: CGFloat = 212
+    static func hasMeasurements(_ measurements: [PanelSection: CGFloat]) -> Bool {
+        [.header, .footer, .dashboard, .accounts].allSatisfy {
+            (measurements[$0] ?? 0).isFinite && (measurements[$0] ?? 0) > 0
+        }
+    }
     static func height(measurements: [PanelSection: CGFloat], hasDashboard: Bool) -> CGFloat {
         guard hasDashboard else { return placeholderHeight }
         let sections: [PanelSection] = [.header, .footer, .dashboard, .accounts]
-        guard sections.allSatisfy({ (measurements[$0] ?? 0).isFinite && (measurements[$0] ?? 0) > 0 }) else {
+        guard hasMeasurements(measurements) else {
             return initialHeight
         }
         let contentHeight = sections.reduce(CGFloat.zero) { $0 + (measurements[$1] ?? 0) }

@@ -45,11 +45,7 @@ struct PinnedAccountsView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 7) {
-                Text("账号管理").font(.system(size: 22, weight: .bold))
-                Text("管理切换顺序与账号订阅")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-            }
+            Text("账号管理").font(.system(size: 22, weight: .bold))
             Spacer(minLength: 0)
             Button { store.loadAvailableAccounts() } label: {
                 HStack(spacing: 6) {
@@ -62,7 +58,7 @@ struct PinnedAccountsView: View {
             }
             .buttonStyle(.bordered).controlSize(.small)
             .disabled(store.isLoadingAccounts || !store.isConfigured || store.isSaving)
-            .help("立即刷新完整账号列表")
+            .help("刷新账号列表")
         }
     }
 
@@ -97,7 +93,7 @@ struct PinnedAccountsView: View {
         return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 if !content.pinned.isEmpty {
-                    accountSection("面板切换", accounts: content.pinned, pinned: true)
+                    accountSection("已 Pin 账号", accounts: content.pinned, pinned: true)
                 }
                 if !content.others.isEmpty {
                     accountSection("其他账号", accounts: content.others, pinned: false)
@@ -122,7 +118,7 @@ struct PinnedAccountsView: View {
                 Text("\(accounts.count)").monospacedDigit().foregroundStyle(.tertiary)
                 if pinned {
                     Image(systemName: "info.circle").foregroundStyle(.tertiary)
-                        .help("已 Pin 账号按顺序在面板中切换。使用上下箭头调整顺序；订阅价格与续费日完整时纳入统计。")
+                        .help("使用上下箭头调整面板中的账号顺序。")
                         .accessibilityLabel("已 Pin 账号按顺序切换，使用上下箭头调整")
                 }
                 Spacer()
@@ -145,7 +141,7 @@ struct PinnedAccountsView: View {
 
     private func missingSection(_ ids: [Int]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("列表中缺失的 Pin", systemImage: "exclamationmark.circle")
+            Label("未找到的已 Pin 账号", systemImage: "exclamationmark.circle")
                 .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
             ForEach(ids, id: \.self) { id in
                 HStack(spacing: 10) {
@@ -166,13 +162,13 @@ struct PinnedAccountsView: View {
                     .help("列表更新于 \(date.formatted(date: .abbreviated, time: .shortened))")
             } else { Text("账号列表尚未加载") }
             Spacer()
-            Label("配置仅保存在本地", systemImage: "internaldrive")
+            Label("配置保存在本机", systemImage: "internaldrive")
         }.font(.system(size: 10)).foregroundStyle(.tertiary)
     }
 
     private var emptyLabel: String {
-        if store.isLoadingAccounts { return "正在获取全部账号…" }
-        if store.needsCredentialAccess { return "请先在连接设置中配置有效密钥" }
+        if store.isLoadingAccounts { return "正在加载账号…" }
+        if store.needsCredentialAccess { return "请在“连接”中设置 Admin Key" }
         if !store.hasLoadedAccounts { return "点击“刷新账号”重试" }
         return store.availableAccounts.isEmpty ? "服务器中暂无账号" : "没有匹配的账号"
     }
@@ -189,7 +185,7 @@ struct PinnedAccountsView: View {
                 Image(systemName: store.isPinned(account.id) ? "pin.fill" : "pin")
                     .font(.system(size: 12, weight: .medium)).frame(width: 28, height: 28)
             }.buttonStyle(AccountDirectoryActionStyle(selected: store.isPinned(account.id)))
-                .help(store.isPinned(account.id) ? "移出切换列表（取消 Pin）" : "加入面板切换（Pin）")
+                .help(store.isPinned(account.id) ? "取消 Pin" : "Pin 到面板")
                 .accessibilityLabel(store.isPinned(account.id) ? "取消 Pin \(account.name)" : "Pin \(account.name)，加入切换列表")
         }.padding(.horizontal, 12).padding(.vertical, 12)
             .accessibilityElement(children: .contain)
@@ -242,9 +238,9 @@ struct PinnedAccountsView: View {
 
     private func subscriptionHelp(_ id: Int) -> String {
         guard let value = store.subscriptions[id], value.isComplete, let day = value.renewalDay else {
-            return "设置月订阅价格与续费日；配置完整的 Pin 账号才纳入统计"
+            return "设置月费和续费日"
         }
-        return "\(subscriptionMoney(value.monthlyPrice, unit: store.configuration.subscriptionCostCurrency)) / 月，每月 \(day) 日续费；点击编辑"
+        return "\(subscriptionMoney(value.monthlyPrice, unit: store.configuration.subscriptionCostCurrency)) / 月，每月 \(day) 日续费"
     }
 }
 
@@ -325,20 +321,22 @@ struct SubscriptionEditor: View {
             Text("订阅设置").font(.title2.bold())
             Text("\(account.name) · #\(account.id)").foregroundStyle(.secondary).lineLimit(1)
             Form {
-                TextField("月订阅价格（\(store.configuration.subscriptionCostCurrency)）", text: $price, prompt: Text("例如 200.00"))
+                TextField("月订阅费（\(store.configuration.subscriptionCostCurrency)）", text: $price, prompt: Text("例如 200.00"))
                     .textFieldStyle(.roundedBorder)
+                    .help("允许填写 0，最多两位小数。")
                 Picker("每月续费日", selection: $day) {
                     Text("未设置").tag(0)
                     ForEach(1...31, id: \.self) { Text("每月 \($0) 日").tag($0) }
                 }
             }
-            Text("仅保存本地。价格可填 0，最多两位小数；缺少价格或续费日不纳入统计。短月取月末，长月恢复原续费日。")
+            Text("填写月费和续费日后，已 Pin 账号将参与统计。续费日超出当月天数时，按月末计算。")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Text("统计时区：\(store.configuration.subscriptionTimeZoneID)（可在“消费统计”修改）")
+            Text("统计时区：\(store.configuration.subscriptionTimeZoneID)")
                 .font(.caption).foregroundStyle(.secondary)
+                .help("在“消费统计”中更改时区。")
             if let error { Text(error).font(.caption).foregroundStyle(.red) }
             HStack {
-                Button("清除配置") { save(clear: true) }
+                Button("清除订阅设置") { save(clear: true) }
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("保存") { save(clear: false) }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)

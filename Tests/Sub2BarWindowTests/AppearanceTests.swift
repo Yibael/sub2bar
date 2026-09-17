@@ -6,6 +6,28 @@ import Sub2BarCore
 
 @MainActor
 final class AppearanceTests: XCTestCase {
+    func testActualCostLoadingKeepsLayoutAndDoesNotReplaceAvailableAmounts() throws {
+        let cases: [(Decimal?, Bool, Bool, Bool)] = [
+            (nil, true, true, true), // Initial or incomplete data while a request is active.
+            (266.46, true, true, false), // Background refresh keeps the amount visible.
+            (0, true, true, false), // Zero is a complete result too.
+            (nil, true, false, false), // A failed request must not spin indefinitely.
+            (nil, false, true, false) // Missing subscription configuration is not loading.
+        ]
+        var heights: [Int] = []
+        for (value, configured, refreshing, loading) in cases {
+            let metric = ActualCostMetric(title: "周期实际消费", value: value, currency: "¥",
+                                          isConfigured: configured, isRefreshing: refreshing, cost: "¥1,366.00")
+            XCTAssertEqual(metric.showsLoading, loading)
+            let renderer = ImageRenderer(content: metric.frame(width: 193))
+            renderer.scale = 2
+            let image = try XCTUnwrap(renderer.cgImage)
+            XCTAssertEqual(image.width, 386)
+            heights.append(image.height)
+        }
+        XCTAssertEqual(Set(heights).count, 1, "Loading must not resize the summary or popover")
+    }
+
     func testAccountManagementGroupedLayoutRendersWithMixedAccounts() async throws {
         let f = try StoreFixture(); defer { f.cleanup() }
         // Synthetic directory data only; never read the user's configuration.
@@ -49,19 +71,19 @@ final class AppearanceTests: XCTestCase {
         XCTAssertEqual(f.backend.requests.count, calls, "Showing the cached directory must not query again")
     }
 
-    func testNeutralPanelBackgroundBlocksBlueAndRedInLightAndDark() throws {
+    func testPanelLeavesNativePopoverMaterialVisibleInBothAppearances() async throws {
+        let f = try StoreFixture(); defer { f.cleanup() }
+        await f.open()
         for scheme in [ColorScheme.light, .dark] {
-            for underlying in [Color.blue, Color.red] {
-                let view = ZStack { underlying; NeutralPanelBackground() }
-                    .frame(width: 40, height: 40).environment(\.colorScheme, scheme)
-                let image = try XCTUnwrap(ImageRenderer(content: view).cgImage)
-                let bitmap = NSBitmapImageRep(cgImage: image)
-                for point in [(10, 5), (10, 20), (10, 35)] {
-                    let color = try XCTUnwrap(bitmap.colorAt(x: point.0, y: point.1)?.usingColorSpace(.deviceRGB))
-                    XCTAssertEqual(color.redComponent, color.greenComponent, accuracy: 0.005)
-                    XCTAssertEqual(color.greenComponent, color.blueComponent, accuracy: 0.005)
-                    XCTAssertEqual(color.alphaComponent, 1, accuracy: 0.001)
-                }
+            let panel = PopoverView(store: f.store, openSettings: {}).environment(\.colorScheme, scheme)
+            let image = try XCTUnwrap(ImageRenderer(content: panel).cgImage)
+            let bitmap = NSBitmapImageRep(cgImage: image)
+            let points = [(10, 10), (image.width / 2, 10), (image.width - 10, 10),
+                          (10, image.height / 2), (10, image.height - 10)]
+            for (x, y) in points {
+                let color = try XCTUnwrap(bitmap.colorAt(x: x, y: y))
+                XCTAssertEqual(color.alphaComponent, 0, accuracy: 0.001,
+                               "Unpainted content must reveal the same AppKit material as the arrow")
             }
         }
     }
@@ -70,10 +92,13 @@ final class AppearanceTests: XCTestCase {
     func testSettingsAndPanelCanRenderOffscreen() async throws {
         let f = try StoreFixture(); defer { f.cleanup() }
         f.backend.usagePercentage = 98
+        f.backend.usageCost = 1897.6132
         f.backend.concurrency = 3
+        f.backend.todayActualCost = 87.65
+        f.backend.actualCost = 266.46
         await f.open()
         let subscriptionAccount = try XCTUnwrap(f.store.snapshots.first?.account)
-        try f.store.saveSubscription(AccountSubscription(monthlyPrice: 200, renewalDay: 12), for: subscriptionAccount)
+        try f.store.saveSubscription(AccountSubscription(monthlyPrice: 1366, renewalDay: 12), for: subscriptionAccount)
         await f.until { !f.store.isRefreshingSubscriptions && !f.store.isRefreshing }
         f.store.loadAvailableAccounts()
         await f.until { f.store.hasLoadedAccounts }
@@ -143,6 +168,14 @@ final class AppearanceTests: XCTestCase {
             XCTAssertEqual(panelImage.width, 864)
             XCTAssertLessThan(panelImage.height, 1320)
             XCTAssertGreaterThan(panelImage.height, 800)
+            f.store.toggleAmountVisibility()
+            let hiddenPanelRenderer = ImageRenderer(content: PopoverView(store: f.store, openSettings: {}, version: version)
+                .environment(\.colorScheme, scheme))
+            hiddenPanelRenderer.scale = 2
+            let hiddenPanelImage = try XCTUnwrap(hiddenPanelRenderer.cgImage)
+            XCTAssertEqual(hiddenPanelImage.width, panelImage.width)
+            XCTAssertEqual(hiddenPanelImage.height, panelImage.height, "Masking amounts must not resize the panel")
+            f.store.toggleAmountVisibility()
             let icons = HStack(spacing: 20) {
                 ForEach(["openai", "anthropic", "gemini", "antigravity", "unknown"], id: \.self) { platform in
                     VStack(spacing: 12) {
@@ -150,7 +183,7 @@ final class AppearanceTests: XCTestCase {
                         Text(platform).font(.system(size: 10))
                     }
                 }
-            }.padding(20).background(NeutralPanelBackground()).environment(\.colorScheme, scheme)
+            }.padding(20).background(PreviewPanelBackground()).environment(\.colorScheme, scheme)
             let iconsRenderer = ImageRenderer(content: icons)
             iconsRenderer.scale = 2
             let iconsImage = try XCTUnwrap(iconsRenderer.cgImage)
@@ -159,7 +192,7 @@ final class AppearanceTests: XCTestCase {
                                    subscriptionSample: f.store.subscriptionSample(for: 1),
                                    actualCostCurrency: f.store.configuration.actualCostCurrency,
                                    subscriptionCostCurrency: f.store.configuration.subscriptionCostCurrency)
-                .frame(width: 396).padding(18).background(NeutralPanelBackground())
+                .frame(width: 396).padding(18).background(PreviewPanelBackground())
                 .environment(\.isMenuPanelSurface, true).environment(\.colorScheme, scheme)
             let cardRenderer = ImageRenderer(content: card)
             cardRenderer.scale = 2
@@ -171,7 +204,7 @@ final class AppearanceTests: XCTestCase {
                 subscription: f.store.subscriptions[1], subscriptionCycle: f.store.subscriptionCycle(for: 1),
                 subscriptionSample: f.store.subscriptionSample(for: 1), actualCostCurrency: "¥", subscriptionCostCurrency: "¥",
                 expanded: true)
-                .frame(width: 396).padding(18).background(NeutralPanelBackground())
+                .frame(width: 396).padding(18).background(PreviewPanelBackground())
                 .environment(\.isMenuPanelSurface, true).environment(\.colorScheme, scheme)
             let expandedRenderer = ImageRenderer(content: expandedCard)
             expandedRenderer.scale = 2
@@ -183,6 +216,8 @@ final class AppearanceTests: XCTestCase {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let panelData = try XCTUnwrap(NSBitmapImageRep(cgImage: panelImage).representation(using: .png, properties: [:]))
                 try panelData.write(to: directory.appendingPathComponent(scheme == .light ? "version-panel-light.png" : "version-panel-dark.png"))
+                let hiddenData = try XCTUnwrap(NSBitmapImageRep(cgImage: hiddenPanelImage).representation(using: .png, properties: [:]))
+                try hiddenData.write(to: directory.appendingPathComponent("privacy-panel-\(scheme == .light ? "light" : "dark").png"))
                 // Hosting in an offscreen AppKit window realizes the lazy list;
                 // ImageRenderer alone omits its account cards.
                 let previewWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 432, height: 660),

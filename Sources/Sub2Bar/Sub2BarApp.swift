@@ -81,6 +81,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         if popover.isShown { popover.performClose(nil); return }
         guard let button = statusItem.button else { return }
+        // Resolve the intrinsic layout before presentation, avoiding the bootstrap height.
+        if let view = popover.contentViewController?.view {
+            view.layoutSubtreeIfNeeded()
+            let height = view.fittingSize.height
+            if height.isFinite, height > 0 {
+                popover.contentSize = NSSize(width: PanelSizing.width, height: height)
+            }
+        }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         // Start immediately once presented; didShow remains an idempotent backup.
         if popover.isShown { store.setPanelVisible(true) }
@@ -112,8 +120,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     onHeightChange: { [weak self] height in
             // Update AppKit only for real geometry changes, never on every poll.
             DispatchQueue.main.async { [weak self] in
-                guard let self, abs(self.popover.contentSize.height - height) >= 1 else { return }
-                self.popover.contentSize = NSSize(width: PanelSizing.width, height: height)
+                guard let self else { return }
+                // Earlier queued measurements may be stale by the time AppKit applies them.
+                let currentHeight = self.popover.contentViewController?.view.fittingSize.height ?? height
+                guard currentHeight.isFinite, currentHeight > 0,
+                      abs(self.popover.contentSize.height - currentHeight) >= 1 else { return }
+                self.popover.contentSize = NSSize(width: PanelSizing.width, height: currentHeight)
             }
         })
     }

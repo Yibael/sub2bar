@@ -1,15 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// Opaque, achromatic content background: no wallpaper-coloured glass gradient
-/// can bleed through the header. The system still supplies popover chrome.
-struct NeutralPanelBackground: View {
-    @Environment(\.colorScheme) private var colorScheme
-    var body: some View {
-        Color(.sRGB, white: colorScheme == .dark ? 0.105 : 0.975, opacity: 1)
-    }
-}
-
 private struct MenuPanelSurfaceKey: EnvironmentKey {
     static let defaultValue = false
 }

@@ -23,6 +23,7 @@ enum ConnectionState: String {
 final class AppStore: ObservableObject {
     typealias ClientFactory = (Configuration, String) -> APIClient
     @Published private(set) var configuration: Configuration
+    @Published private(set) var areAmountsHidden: Bool
     @Published private(set) var snapshots: [AccountSnapshot] = []
     @Published private(set) var pinnedIDs: [Int] = []
     @Published private(set) var selectedPinnedID: Int?
@@ -101,6 +102,7 @@ final class AppStore: ObservableObject {
     private let defaultsKey = "sub2bar.configuration.v1"
     private let pinsKey = "sub2bar.pins.v1"
     private let subscriptionsKey = "sub2bar.subscriptions.v1"
+    private let amountsHiddenKey = "sub2bar.amountsHidden.v1"
     private static let accountsCacheLifetime: TimeInterval = 60
 
     init(defaults: UserDefaults = .standard, credentials: CredentialSession? = nil,
@@ -108,6 +110,7 @@ final class AppStore: ObservableObject {
          clientFactory: @escaping ClientFactory = { APIClient(configuration: $0, key: $1) }) {
         self.defaults = defaults; self.credentials = credentials ?? CredentialSession()
         self.clientFactory = clientFactory; self.now = now; self.automaticallySchedule = automaticallySchedule
+        areAmountsHidden = defaults.bool(forKey: amountsHiddenKey)
         configuration = defaults.data(forKey: defaultsKey).flatMap { try? JSONDecoder().decode(Configuration.self, from: $0) } ?? Configuration()
         pinSelection = defaults.data(forKey: pinsKey).flatMap { try? JSONDecoder().decode(PinnedAccountSelection.self, from: $0) } ?? PinnedAccountSelection()
         subscriptionPreferences = defaults.data(forKey: subscriptionsKey)
@@ -115,6 +118,12 @@ final class AppStore: ObservableObject {
         restorePins()
         restoreSubscriptions()
     }
+
+    func toggleAmountVisibility() {
+        areAmountsHidden.toggle()
+        defaults.set(areAmountsHidden, forKey: amountsHiddenKey)
+    }
+
     var isConfigured: Bool { !configuration.serverURL.isEmpty }
     var hostLabel: String { (try? configuration.baseURL().host) ?? "未配置服务器" }
     var pinCount: Int { pinnedIDs.count }
@@ -141,6 +150,11 @@ final class AppStore: ObservableObject {
     var isPolling: Bool { pollTask != nil }
     /// Header feedback belongs to quota work, not the frequent runtime polls.
     var isRefreshingUsage: Bool { isRefreshingQuota }
+    var isLoadingInitialAccounts: Bool {
+        // AppKit lays out the content before didShow starts polling.
+        isConfigured && !needsCredentialAccess && pinCount > 0 && !isSuspended && !requiresReopen &&
+            snapshots.isEmpty && statusUpdatedAt == nil && errorMessage == nil
+    }
     var connectionState: ConnectionState {
         guard isConfigured else { return .notConfigured }
         if errorMessage != nil { return .failed }
@@ -150,7 +164,7 @@ final class AppStore: ObservableObject {
         // Keep the last successful connection state during ordinary polling.
         // An upstream quota failure is not a failed connection to sub2api.
         if lastUpdated != nil { return .connected }
-        return isRefreshing ? .connecting : .disconnected
+        return isRefreshing || isLoadingInitialAccounts ? .connecting : .disconnected
     }
     var canPoll: Bool { isPanelVisible && !isSuspended && !requiresReopen && !isSaving && isConfigured && !needsCredentialAccess && !pinnedIDs.isEmpty }
     var platforms: [String] { ["全部"] + Set(snapshots.map(\.account.platformLabel)).sorted() }
@@ -712,6 +726,18 @@ final class AppStore: ObservableObject {
     func secondsUntilRefresh(at date: Date) -> Int? {
         guard canPoll, !isRefreshingQuota, let nextRefreshAt else { return nil }
         return max(0, Int(ceil(nextRefreshAt.timeIntervalSince(date))))
+    }
+
+    func quotaRefreshLabel(at date: Date) -> String {
+        if needsCredentialAccess { return isLoadingCredential ? "加载中" : "待配置" }
+        if isLoadingInitialAccounts { return "加载中" }
+        if showsQuotaLoading { return "额度刷新 00:00" }
+        if let seconds = secondsUntilRefresh(at: date) {
+            return String(format: "额度刷新 %02d:%02d", seconds / 60, seconds % 60)
+        }
+        if pinCount == 0 { return "" }
+        if canPoll { return errorMessage == nil ? "加载中" : "等待重试" }
+        return "已暂停"
     }
     /// Keep fast quota cycles visible without delaying requests or changing
     /// polling deadlines. A new cycle cancels the previous visual hide task.

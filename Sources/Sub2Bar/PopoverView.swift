@@ -24,10 +24,9 @@ struct PopoverView: View {
         self.onHeightChange = onHeightChange
     }
 
-    private var panelHeight: CGFloat {
-        PanelSizing.height(measurements: measurements,
-                           hasDashboard: store.isConfigured && !store.needsCredentialAccess && store.pinCount > 0)
-    }
+    private var hasDashboard: Bool { store.isConfigured && !store.needsCredentialAccess && store.pinCount > 0 }
+    private var panelHeight: CGFloat { PanelSizing.height(measurements: measurements, hasDashboard: hasDashboard) }
+    private var canReportHeight: Bool { !hasDashboard || PanelSizing.hasMeasurements(measurements) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,15 +37,18 @@ struct PopoverView: View {
             else { dashboard }
             footer.measurePanelSection(.footer)
         }
-        .frame(width: PanelSizing.width, height: panelHeight)
-        .background(NeutralPanelBackground())
+        .frame(width: PanelSizing.width)
+        .frame(height: hasDashboard ? nil : PanelSizing.placeholderHeight)
+        .fixedSize(horizontal: false, vertical: true)
+        // NSPopover supplies one continuous material for the body and its arrow.
         .tint(Theme.accent)
         .environment(\.isMenuPanelSurface, true)
+        .environment(\.sensitiveAmountsHidden, store.areAmountsHidden)
         .onPreferenceChange(PanelMeasurements.self) { value in
             if measurements != value { measurements = value }
         }
-        .onChange(of: panelHeight) { _, height in onHeightChange(height) }
-        .onAppear { onHeightChange(panelHeight) }
+        .onChange(of: panelHeight) { _, height in if canReportHeight { onHeightChange(height) } }
+        .onAppear { if canReportHeight { onHeightChange(panelHeight) } }
     }
 
     private var header: some View {
@@ -61,7 +63,7 @@ struct PopoverView: View {
             }
             Spacer()
             refreshStatus
-            QuotaRefreshButton(isLoading: store.showsQuotaLoading,
+            QuotaRefreshButton(isLoading: store.showsQuotaLoading || store.isLoadingInitialAccounts,
                                isEnabled: !store.needsCredentialAccess && store.isPanelVisible && store.isConfigured && store.pinCount > 0,
                                action: store.refreshManually)
         }
@@ -70,17 +72,8 @@ struct PopoverView: View {
 
     private var refreshStatus: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            QuotaRefreshStatus(text: refreshLabel(at: context.date))
+            QuotaRefreshStatus(text: store.quotaRefreshLabel(at: context.date))
         }
-    }
-
-    private func refreshLabel(at date: Date) -> String {
-        if store.needsCredentialAccess { return store.isLoadingCredential ? "载入中" : "待配置" }
-        if store.showsQuotaLoading { return "额度刷新 00:00" }
-        if let seconds = store.secondsUntilRefresh(at: date) {
-            return String(format: "额度刷新 %02d:%02d", seconds / 60, seconds % 60)
-        }
-        return store.pinCount == 0 ? "" : "已暂停"
     }
 
     private var welcome: some View {
@@ -126,16 +119,17 @@ struct PopoverView: View {
 
     private var dashboardHeader: some View {
         VStack(spacing: 12) {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(spacing: 10) {
                 todayActualSummary
                 subscriptionSummary
             }
             HStack(spacing: 10) {
-                summaryCard("总并发", value: store.concurrency.map(String.init) ?? "—",
-                            suffix: store.concurrencyLimit.map { "/ \($0)" } ?? "")
+                summaryCard("总并发", icon: "bolt.horizontal", value: store.concurrency.map(String.init) ?? "—",
+                            suffix: store.concurrencyLimit.map { "/ \($0)" } ?? "", isLoading: store.isLoadingInitialAccounts)
                     .help("当前并发 / 并发上限；已读取 \(store.snapshots.count)/\(store.pinCount) 个账号。")
-                summaryCard("周额度估算", value: money(store.estimatedTotal),
-                            suffix: "")
+                summaryCard("周额度估算", icon: "chart.bar", value: money(store.estimatedTotal), suffix: "", isSensitive: true,
+                            isLoading: store.estimatedTotal == nil && (store.isLoadingInitialAccounts ||
+                                (store.isRefreshingQuota && store.snapshots.allSatisfy { $0.statisticsUsage == nil })))
                     .help("仅汇总已 Pin 的 OpenAI 账号。本周用量 ÷ 周已用比例，不是余额。覆盖 \(store.estimatedAccounts.count)/\(store.pinCount) 个账号。")
             }
             if let error = store.errorMessage {
@@ -164,7 +158,8 @@ struct PopoverView: View {
                 Text(error)
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-            }.frame(maxWidth: .infinity, alignment: .leading).padding(13).insetSurface(cornerRadius: 9)
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(13)
+                .frame(minHeight: PanelSizing.accountCardHeight, alignment: .topLeading).insetSurface(cornerRadius: 9)
         } else if let snapshot = store.selectedPinnedSnapshot {
             AccountCard(snapshot: snapshot, stale: store.errorMessage != nil,
                         isPanelVisible: store.isPanelVisible,
@@ -176,15 +171,13 @@ struct PopoverView: View {
                         subscriptionError: store.subscriptionErrors[snapshot.id],
                         actualCostCurrency: store.configuration.actualCostCurrency,
                         subscriptionCostCurrency: store.configuration.subscriptionCostCurrency,
+                        isRefreshingTodayUsage: store.isRefreshing,
+                        isRefreshingQuota: store.isRefreshingQuota,
+                        isRefreshingSubscription: store.isRefreshingSubscriptions,
                         onSwitchAccount: store.selectAdjacentPinned)
                 .id(snapshot.id)
         } else {
-            VStack(spacing: 12) {
-                Image(systemName: store.isRefreshing ? "arrow.triangle.2.circlepath" : "tray")
-                    .font(.system(size: 28)).foregroundStyle(.tertiary)
-                Text(store.isRefreshing ? "加载中…" : "账号尚未载入")
-                    .font(.system(size: 13)).foregroundStyle(.secondary)
-            }.frame(maxWidth: .infinity).padding(.vertical, 30)
+            AccountLoadingPlaceholder(isLoading: store.isLoadingInitialAccounts || store.isRefreshing)
         }
     }
 
@@ -202,53 +195,38 @@ struct PopoverView: View {
         }.buttonStyle(.plain).font(.system(size: 11, weight: .medium))
     }
 
-    private func summaryCard(_ title: String, value: String, suffix: String) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+    private func summaryCard(_ title: String, icon: String, value: String, suffix: String,
+                             isSensitive: Bool = false, isLoading: Bool = false) -> some View {
+        DashboardSummaryCard(title: title, icon: icon) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(value).font(.system(size: 25, weight: .semibold)).minimumScaleFactor(0.7)
-                Text(suffix).font(.system(size: 14, weight: .medium)).foregroundStyle(.tertiary)
+                Group {
+                    if isLoading { ProgressView().controlSize(.small).accessibilityLabel("\(title)加载中") }
+                    else if isSensitive { SensitiveAmountText(value: value, label: title) }
+                    else { Text(value) }
+                }.font(.system(size: 24, weight: .semibold)).minimumScaleFactor(0.6)
+                if !suffix.isEmpty {
+                    Text(suffix).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary).fixedSize()
+                }
             }.lineLimit(1).monospacedDigit()
         }
-        .frame(maxWidth: .infinity, alignment: .leading).padding(13)
-        .insetSurface(cornerRadius: 9)
     }
 
     private var todayActualSummary: some View {
-        actualCostSummary(title: "今日实际消费", value: store.totalTodayActualCost,
-            note: store.eligibleSubscriptionIDs.isEmpty ? "请先配置订阅" :
-                (store.totalTodayActualCost == nil ? "统计未完整" : ""))
+        actualCostSummary(title: "今日实际消费", icon: "sun.max", value: store.totalTodayActualCost)
             .help("与周期汇总使用相同的已 Pin 且订阅配置完整的 OAuth 账号，按统计时区今日零点起计算实际用户扣费（含倍率），沿用 Admin 开关。统计时区：\(store.configuration.subscriptionTimeZoneID)。")
     }
 
     private var subscriptionSummary: some View {
-        let count = store.eligibleSubscriptionIDs.count
-        let read = store.eligibleSubscriptionIDs.filter { store.subscriptionSample(for: $0) != nil }.count
-        return actualCostSummary(title: "周期实际消费", value: store.totalSubscriptionActualCost,
-            note: count == 0 ? "请先配置订阅" : (read < count ? "统计未完整" : ""),
-            cost: subscriptionMoney(store.totalSubscriptionCost, unit: store.configuration.subscriptionCostCurrency))
-            .help("各账号按自己的当前订阅周期统计实际用户扣费（含倍率）；成本是同一组账号完整月订阅价之和，不按天摊销。统计时区：\(store.configuration.subscriptionTimeZoneID)。")
+        actualCostSummary(title: "周期实际消费", icon: "calendar", value: store.totalSubscriptionActualCost,
+                          cost: subscriptionMoney(store.totalSubscriptionCost, unit: store.configuration.subscriptionCostCurrency))
+            .help("各账号按自己的当前订阅周期统计实际用户扣费（含倍率）；斜杠后为同一组账号完整月订阅价之和，不按天摊销。统计时区：\(store.configuration.subscriptionTimeZoneID)。")
     }
 
-    private func actualCostSummary(title: String, value: Decimal?, note: String, cost: String? = nil) -> some View {
-        return VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 4) {
-                Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                if store.isRefreshingSubscriptions { ProgressView().controlSize(.mini).frame(width: 10, height: 10) }
-            }
-            Text(subscriptionMoney(value, unit: store.configuration.actualCostCurrency))
-                .font(.system(size: 24, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.5)
-            HStack(spacing: 4) {
-                if let cost {
-                    Text("订阅成本").foregroundStyle(.secondary)
-                    Text(cost).foregroundStyle(.secondary).monospacedDigit()
-                } else { Text(note).foregroundStyle(.secondary) }
-            }.font(.system(size: 10)).lineLimit(1).minimumScaleFactor(0.5).frame(height: 13)
-            if cost != nil && !note.isEmpty {
-                Text(note).font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-        }.frame(maxWidth: .infinity, alignment: .leading).padding(13).insetSurface(cornerRadius: 9)
+    private func actualCostSummary(title: String, icon: String, value: Decimal?, cost: String? = nil) -> some View {
+        ActualCostMetric(title: title, value: value,
+            currency: store.configuration.actualCostCurrency,
+            isConfigured: !store.eligibleSubscriptionIDs.isEmpty,
+            isRefreshing: store.isRefreshingSubscriptions || store.isLoadingInitialAccounts, icon: icon, cost: cost)
     }
 
     private var footer: some View {
@@ -268,6 +246,7 @@ struct PopoverView: View {
                 Spacer()
                 Button { store.openDashboard() } label: { Image(systemName: "arrow.up.right.square") }
                     .disabled(!store.isConfigured).help("打开 sub2api 后台").accessibilityLabel("打开 sub2api 后台")
+                AmountVisibilityButton(isHidden: store.areAmountsHidden, action: store.toggleAmountVisibility)
                 Button(action: openSettings) { Image(systemName: "gearshape") }.help("设置…").accessibilityLabel("设置")
                 Button { NSApplication.shared.terminate(nil) } label: { Image(systemName: "power") }
                     .help("退出 Sub2Bar").accessibilityLabel("退出 Sub2Bar")
@@ -289,6 +268,64 @@ struct PopoverView: View {
             Text("0 个账号")
                 .font(.system(size: 11)).foregroundStyle(.secondary).padding(.bottom, 28)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct DashboardSummaryCard<Content: View>: View {
+    let title: String
+    let icon: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: icon).frame(width: 12).accessibilityHidden(true)
+                Text(title)
+            }
+            .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+            .lineLimit(1).frame(height: 14, alignment: .leading)
+            content.frame(maxWidth: .infinity, alignment: .leading).frame(height: 32)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 10))
+        .insetSurface(cornerRadius: 10)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct ActualCostMetric: View {
+    let title: String
+    let value: Decimal?
+    let currency: String
+    let isConfigured: Bool
+    let isRefreshing: Bool
+    var icon: String = "calendar"
+    var cost: String? = nil
+
+    var showsLoading: Bool { isConfigured && value == nil && isRefreshing }
+
+    var body: some View {
+        DashboardSummaryCard(title: title, icon: icon) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                if showsLoading {
+                    ProgressView().controlSize(.small)
+                        .accessibilityLabel("统计数据加载中")
+                } else if !isConfigured {
+                    Text("未配置订阅").font(.system(size: 13)).foregroundStyle(.secondary)
+                } else {
+                    SensitiveAmountText(value: subscriptionMoney(value, unit: currency), label: title)
+                        .font(.system(size: 24, weight: .semibold)).minimumScaleFactor(0.55)
+                }
+                if let cost {
+                    SensitiveAmountText(value: cost, prefix: "/ ", label: "订阅成本")
+                        .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                        .minimumScaleFactor(0.75)
+                        .help("订阅成本")
+                }
+            }
+            .monospacedDigit().lineLimit(1)
+        }
     }
 }
 
@@ -386,6 +423,23 @@ struct QuotaRefreshButton: View {
     }
 }
 
+struct AccountLoadingPlaceholder: View {
+    let isLoading: Bool
+
+    var body: some View {
+        Group {
+            if isLoading {
+                ProgressView().controlSize(.regular).accessibilityLabel("账号加载中")
+            } else {
+                Text("账号尚未载入").font(.system(size: 13)).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: PanelSizing.accountCardHeight)
+        .insetSurface(cornerRadius: 9)
+    }
+}
+
 struct AccountCard: View {
     let snapshot: AccountSnapshot
     let stale: Bool
@@ -398,9 +452,18 @@ struct AccountCard: View {
     var subscriptionError: String? = nil
     var actualCostCurrency = "$"
     var subscriptionCostCurrency = "$"
+    var isRefreshingTodayUsage = false
+    var isRefreshingQuota = false
+    var isRefreshingSubscription = false
     var onSwitchAccount: ((Int) -> Void)? = nil
     @State var expanded = false
     private var account: Account { snapshot.account }
+    var showsSubscriptionLoading: Bool {
+        subscription?.isComplete == true && subscriptionSample == nil && subscriptionError == nil && isRefreshingSubscription
+    }
+    private var awaitsQuota: Bool {
+        isRefreshingQuota && snapshot.statisticsUsage == nil && snapshot.usage == nil && snapshot.usageError == nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -438,31 +501,32 @@ struct AccountCard: View {
                 quotaLines(at: .now)
             }
             HStack(spacing: 12) {
-                usageMetric("今日用量", todayCost, alignment: .leading)
+                usageMetric("今日用量", todayCost, alignment: .leading,
+                            isLoading: todayCost == nil && todayUsageError == nil && isRefreshingTodayUsage)
                     .help("按标准价格折算，不含倍率；从服务端时区今日 00:00 起，仅统计本实例记录的用量。")
                 Divider().frame(height: 28)
-                usageMetric("本周用量", snapshot.weeklyCost, alignment: .leading)
+                usageMetric("本周用量", snapshot.weeklyCost, alignment: .leading, isLoading: awaitsQuota)
                     .help("7 天额度重置窗口内的账号口径费用，包含账号倍率，不是自然周。")
                 Divider().frame(height: 28)
-                usageMetric("周额度估算", snapshot.estimatedWeeklyCost, alignment: .leading)
+                usageMetric("周额度估算", snapshot.estimatedWeeklyCost, alignment: .leading,
+                            isLoading: awaitsQuota && account.platform == "openai")
             }.padding(.vertical, 4)
 
             if account.supportsSubscription {
                 if subscription?.isComplete == true {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 12) {
-                            textMetric("周期消费", subscriptionMoney(subscriptionSample?.actualCost, unit: actualCostCurrency))
+                            textMetric("周期消费", subscriptionMoney(subscriptionSample?.actualCost, unit: actualCostCurrency),
+                                       isSensitive: true, isLoading: showsSubscriptionLoading)
                                 .help("当前订阅周期实际扣费（含倍率）")
                             Divider().frame(height: 28)
-                            textMetric("订阅成本", subscriptionMoney(subscription?.monthlyPrice, unit: subscriptionCostCurrency))
+                            textMetric("订阅成本", subscriptionMoney(subscription?.monthlyPrice, unit: subscriptionCostCurrency), isSensitive: true)
                             Divider().frame(height: 28)
                             textMetric("周期", subscriptionCycle?.shortLabel ?? "—")
                                 .help(subscriptionCycle?.label ?? "周期不可用")
                         }
                         if let subscriptionError {
                             Text(subscriptionError).font(.system(size: 10)).foregroundStyle(.secondary)
-                        } else if subscriptionSample == nil {
-                            Text("消费统计待更新").font(.system(size: 10)).foregroundStyle(.secondary)
                         }
                     }
                 } else {
@@ -485,7 +549,9 @@ struct AccountCard: View {
             }
             if expanded { details }
         }
-        .padding(13).insetSurface(cornerRadius: 9)
+        .padding(13)
+        .frame(minHeight: PanelSizing.accountCardHeight, alignment: .topLeading)
+        .insetSurface(cornerRadius: 9)
         .opacity(stale ? 0.65 : 1)
         .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
             // Expanded detail text remains selectable without accidental paging.
@@ -495,19 +561,28 @@ struct AccountCard: View {
         })
     }
 
-    private func usageMetric(_ title: String, _ value: Double?, alignment: HorizontalAlignment) -> some View {
+    private func usageMetric(_ title: String, _ value: Double?, alignment: HorizontalAlignment, isLoading: Bool = false) -> some View {
         VStack(alignment: alignment, spacing: 3) {
             Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
-            Text(money(value)).font(.system(size: 12, weight: .medium)).monospacedDigit()
+            Group {
+                if isLoading { ProgressView().controlSize(.mini).accessibilityLabel("\(title)加载中") }
+                else { SensitiveAmountText(value: money(value), label: title) }
+            }.font(.system(size: 12, weight: .medium)).monospacedDigit()
                 .lineLimit(1).minimumScaleFactor(0.75)
+                .frame(height: 16)
         }.frame(maxWidth: .infinity, alignment: Alignment(horizontal: alignment, vertical: .center))
     }
 
-    private func textMetric(_ title: String, _ value: String) -> some View {
+    private func textMetric(_ title: String, _ value: String, isSensitive: Bool = false, isLoading: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 12, weight: .medium)).monospacedDigit()
+            Group {
+                if isLoading { ProgressView().controlSize(.mini).accessibilityLabel("\(title)加载中") }
+                else if isSensitive { SensitiveAmountText(value: value, label: title) }
+                else { Text(value) }
+            }.font(.system(size: 12, weight: .medium)).monospacedDigit()
                 .lineLimit(1).minimumScaleFactor(0.75)
+                .frame(height: 16)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -531,9 +606,15 @@ struct AccountCard: View {
                     }
                 }
             }.frame(height: 4)
-            Text(percentage.map { String(format: "%.1f%%", $0) } ?? "—")
+            Group {
+                if percentage == nil && awaitsQuota {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Text(percentage.map { String(format: "%.1f%%", $0) } ?? "—")
+                }
+            }
                 .font(.system(size: 10, weight: .medium)).monospacedDigit()
-                .foregroundStyle(Theme.usageColor(percentage)).frame(width: 47, alignment: .trailing)
+                .foregroundStyle(Theme.usageColor(percentage)).frame(width: 47, height: 12, alignment: .trailing)
             if let resetCountdown {
                 Label(resetCountdown, systemImage: "clock.arrow.circlepath")
                     .font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
@@ -551,8 +632,8 @@ struct AccountCard: View {
             detail("类型", account.type ?? "—")
             detail("5 小时重置", resetText(snapshot.usage?.fiveHour))
             detail("7 天重置", resetText(snapshot.usage?.sevenDay))
-            detail("今日用量（标准价）", money(todayCost))
-            detail("本周用量", money(snapshot.weeklyCost))
+            detail("今日用量（标准价）", money(todayCost), isSensitive: true)
+            detail("本周用量", money(snapshot.weeklyCost), isSensitive: true)
             if let subscriptionCycle { detail("订阅周期（含首尾）", subscriptionCycle.label) }
             if let subscriptionSample {
                 detail("本周期消费采样", subscriptionSample.sampledAt.formatted(date: .abbreviated, time: .shortened))
@@ -563,7 +644,7 @@ struct AccountCard: View {
                 detail("计费统计采样", updated.formatted(date: .omitted, time: .standard))
             }
             detail("RPM / 活跃会话", "\(account.currentRpm.map(String.init) ?? "—") / \(account.activeSessions.map(String.init) ?? "—")")
-            if let limit = account.quotaWeeklyLimit, limit > 0 { detail("配置的周限额", money(limit)) }
+            if let limit = account.quotaWeeklyLimit, limit > 0 { detail("配置的周限额", money(limit), isSensitive: true) }
             if let usage = snapshot.usage {
                 if let value = usage.sevenDaySonnet?.percentage { usageLine(title: "Sonnet", percentage: value) }
                 if let value = usage.geminiSharedDaily?.percentage { usageLine(title: "日共享", percentage: value) }
@@ -576,8 +657,15 @@ struct AccountCard: View {
             }
         }.font(.system(size: 10))
     }
-    private func detail(_ title: String, _ value: String) -> some View {
-        HStack { Text(title).foregroundStyle(.secondary); Spacer(); Text(value).textSelection(.enabled) }
+    private func detail(_ title: String, _ value: String, isSensitive: Bool = false) -> some View {
+        HStack {
+            Text(title).foregroundStyle(.secondary)
+            Spacer()
+            Group {
+                if isSensitive { SensitiveAmountText(value: value, label: title) }
+                else { Text(value) }
+            }.textSelection(.enabled)
+        }
     }
     private func resetText(_ window: UsageWindow?) -> String {
         guard let date = window?.resetDate else { return "未知" }

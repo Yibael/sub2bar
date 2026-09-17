@@ -1,6 +1,15 @@
 import XCTest
+import SwiftUI
 import Sub2BarCore
 @testable import Sub2Bar
+
+/// A neutral backing for offscreen component previews. The live popover uses AppKit's material.
+struct PreviewPanelBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+    var body: some View {
+        Color(.sRGB, white: colorScheme == .dark ? 0.105 : 0.975, opacity: 1)
+    }
+}
 
 actor MemoryVault: CredentialStorage {
     var values: [String: String]
