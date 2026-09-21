@@ -124,12 +124,16 @@ struct PopoverView: View {
                 subscriptionSummary
             }
             HStack(spacing: 10) {
-                summaryCard("总并发", icon: "bolt.horizontal", value: store.concurrency.map(String.init) ?? "—",
-                            suffix: store.concurrencyLimit.map { "/ \($0)" } ?? "", isLoading: store.isLoadingInitialAccounts)
+                summaryCard("总并发", icon: "bolt.horizontal", value: store.concurrencySummary.value.map { String($0.count) } ?? "—",
+                            suffix: store.concurrencySummary.value?.limit.map { "/ \($0)" } ?? "",
+                            isLoading: store.concurrencySummary.showsLoading,
+                            isRefreshing: store.concurrencySummary.showsRefreshIndicator,
+                            failureHelp: store.concurrencySummary.failureHelp)
                     .help("当前并发 / 并发上限；已读取 \(store.snapshots.count)/\(store.pinCount) 个账号。")
-                summaryCard("周额度估算", icon: "chart.bar", value: money(store.estimatedTotal), suffix: "", isSensitive: true,
-                            isLoading: store.estimatedTotal == nil && (store.isLoadingInitialAccounts ||
-                                (store.isRefreshingQuota && store.snapshots.allSatisfy { $0.statisticsUsage == nil })))
+                summaryCard("周额度估算", icon: "chart.bar", value: money(store.estimateSummary.value), suffix: "", isSensitive: true,
+                            isLoading: store.estimateSummary.showsLoading,
+                            isRefreshing: store.estimateSummary.showsRefreshIndicator,
+                            failureHelp: store.estimateSummary.failureHelp)
                     .help("仅汇总已 Pin 的 OpenAI 账号。本周用量 ÷ 周已用比例，不是余额。覆盖 \(store.estimatedAccounts.count)/\(store.pinCount) 个账号。")
             }
             if let error = store.errorMessage {
@@ -196,8 +200,9 @@ struct PopoverView: View {
     }
 
     private func summaryCard(_ title: String, icon: String, value: String, suffix: String,
-                             isSensitive: Bool = false, isLoading: Bool = false) -> some View {
-        DashboardSummaryCard(title: title, icon: icon) {
+                             isSensitive: Bool = false, isLoading: Bool = false,
+                             isRefreshing: Bool = false, failureHelp: String? = nil) -> some View {
+        DashboardSummaryCard(title: title, icon: icon, isRefreshing: isRefreshing, failureHelp: failureHelp) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Group {
                     if isLoading { ProgressView().controlSize(.small).accessibilityLabel("\(title)加载中") }
@@ -212,21 +217,24 @@ struct PopoverView: View {
     }
 
     private var todayActualSummary: some View {
-        actualCostSummary(title: "今日实际消费", icon: "sun.max", value: store.totalTodayActualCost)
+        actualCostSummary(title: "今日实际消费", icon: "sun.max", today: true)
             .help("与周期汇总使用相同的已 Pin 且订阅配置完整的 OAuth 账号，按统计时区今日零点起计算实际用户扣费（含倍率），沿用 Admin 开关。统计时区：\(store.configuration.subscriptionTimeZoneID)。")
     }
 
     private var subscriptionSummary: some View {
-        actualCostSummary(title: "周期实际消费", icon: "calendar", value: store.totalSubscriptionActualCost,
-                          cost: subscriptionMoney(store.totalSubscriptionCost, unit: store.configuration.subscriptionCostCurrency))
+        actualCostSummary(title: "周期实际消费", icon: "calendar", today: false)
             .help("各账号按自己的当前订阅周期统计实际用户扣费（含倍率）；斜杠后为同一组账号完整月订阅价之和，不按天摊销。统计时区：\(store.configuration.subscriptionTimeZoneID)。")
     }
 
-    private func actualCostSummary(title: String, icon: String, value: Decimal?, cost: String? = nil) -> some View {
-        ActualCostMetric(title: title, value: value,
+    private func actualCostSummary(title: String, icon: String, today: Bool) -> some View {
+        let state = store.actualCostSummary(today: today)
+        return ActualCostMetric(title: title, value: state.value?.amount,
             currency: store.configuration.actualCostCurrency,
             isConfigured: !store.eligibleSubscriptionIDs.isEmpty,
-            isRefreshing: store.isRefreshingSubscriptions || store.isLoadingInitialAccounts, icon: icon, cost: cost)
+            isRefreshing: state.isRefreshing, icon: icon,
+            cost: today ? nil : subscriptionMoney(state.value?.subscriptionCost ?? store.totalSubscriptionCost,
+                                                  unit: store.configuration.subscriptionCostCurrency),
+            failureHelp: state.failureHelp)
     }
 
     private var footer: some View {
@@ -274,6 +282,8 @@ struct PopoverView: View {
 struct DashboardSummaryCard<Content: View>: View {
     let title: String
     let icon: String
+    var isRefreshing = false
+    var failureHelp: String? = nil
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -281,6 +291,8 @@ struct DashboardSummaryCard<Content: View>: View {
             HStack(spacing: 6) {
                 Image(systemName: icon).frame(width: 12).accessibilityHidden(true)
                 Text(title)
+                Spacer(minLength: 2)
+                DashboardRefreshIndicator(title: title, isRefreshing: isRefreshing, failureHelp: failureHelp)
             }
             .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
             .lineLimit(1).frame(height: 14, alignment: .leading)
@@ -294,6 +306,38 @@ struct DashboardSummaryCard<Content: View>: View {
     }
 }
 
+/// Delaying only the corner indicator avoids flashes without delaying data or
+/// extending the spinner after completion. Its slot never changes card layout.
+struct DashboardRefreshIndicator: View {
+    let title: String
+    let isRefreshing: Bool
+    let failureHelp: String?
+    @State private var showsSpinner = false
+
+    var body: some View {
+        ZStack {
+            if isRefreshing && showsSpinner {
+                ProgressView().controlSize(.mini)
+                    .accessibilityLabel("\(title)更新中")
+                    .help("正在更新，当前显示上次结果")
+            } else if !isRefreshing, let failureHelp {
+                Image(systemName: "exclamationmark.circle")
+                    .font(.system(size: 11))
+                    .help(failureHelp)
+                    .accessibilityLabel("\(title)：\(failureHelp)")
+            }
+        }
+        .frame(width: 12, height: 12)
+        .task(id: isRefreshing) {
+            showsSpinner = false
+            guard isRefreshing else { return }
+            do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+            guard !Task.isCancelled else { return }
+            showsSpinner = true
+        }
+    }
+}
+
 struct ActualCostMetric: View {
     let title: String
     let value: Decimal?
@@ -302,11 +346,13 @@ struct ActualCostMetric: View {
     let isRefreshing: Bool
     var icon: String = "calendar"
     var cost: String? = nil
+    var failureHelp: String? = nil
 
     var showsLoading: Bool { isConfigured && value == nil && isRefreshing }
+    var showsRefreshIndicator: Bool { isConfigured && value != nil && isRefreshing }
 
     var body: some View {
-        DashboardSummaryCard(title: title, icon: icon) {
+        DashboardSummaryCard(title: title, icon: icon, isRefreshing: showsRefreshIndicator, failureHelp: failureHelp) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 if showsLoading {
                     ProgressView().controlSize(.small)

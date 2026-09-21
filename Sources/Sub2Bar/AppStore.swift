@@ -51,6 +51,11 @@ final class AppStore: ObservableObject {
     @Published private(set) var isSaving = false
     @Published private(set) var isPanelVisible = false
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isRefreshingAccountSummary = false
+    @Published private var concurrencyCache = DashboardMetricCache<DashboardConcurrency>()
+    @Published private var estimateCache = DashboardMetricCache<Double>()
+    @Published private var todayActualCache = DashboardMetricCache<DashboardActualCost>()
+    @Published private var cycleActualCache = DashboardMetricCache<DashboardActualCost>()
     @Published private(set) var isRefreshingQuota = false { didSet { updateQuotaLoading() } }
     @Published private(set) var showsQuotaLoading = false
     @Published private(set) var nextRefreshAt: Date?
@@ -215,6 +220,56 @@ final class AppStore: ObservableObject {
         let costs = ids.compactMap { todayActualSample(for: $0)?.actualCost }
         guard costs.count == ids.count else { return nil }
         return costs.reduce(0, +)
+    }
+
+    private var accountSummaryScope: DashboardMetricScope {
+        DashboardMetricScope(connection: accountsGeneration, accountIDs: pinnedIDs.sorted())
+    }
+    private func actualSummaryScope(today: Bool) -> DashboardMetricScope {
+        let ids = eligibleSubscriptionIDs.sorted()
+        var scope = accountSummaryScope
+        scope.accountIDs = ids
+        scope.subscriptions = subscriptions.filter { ids.contains($0.key) }
+        scope.cycles = ids.compactMap { subscriptionCycle(for: $0) }
+        scope.includesAdmin = configuration.includeAdminUsage
+        scope.timeZoneID = configuration.subscriptionTimeZoneID
+        if today { scope.day = scope.cycles.first?.dateString(now()) }
+        return scope
+    }
+    private var concurrencyFailed: Bool { errorMessage != nil || !pinnedAccountErrors.isEmpty }
+    private var estimateFailed: Bool {
+        concurrencyFailed || snapshots.contains { $0.account.platform == "openai" && $0.usageError != nil }
+    }
+    private func actualSummaryFailed(today: Bool) -> Bool {
+        let errors = today ? todayActualErrors : subscriptionErrors
+        return eligibleSubscriptionIDs.contains { errors[$0] != nil || pinnedAccountErrors[$0] != nil }
+    }
+    private var currentConcurrencySummary: DashboardConcurrency? {
+        concurrency.map { DashboardConcurrency(count: $0, limit: concurrencyLimit) }
+    }
+    private func currentActualSummary(today: Bool) -> DashboardActualCost? {
+        (today ? totalTodayActualCost : totalSubscriptionActualCost).map {
+            DashboardActualCost(amount: $0, subscriptionCost: today ? nil : totalSubscriptionCost)
+        }
+    }
+    private func metricState<Value>(cache: DashboardMetricCache<Value>, scope: DashboardMetricScope,
+                                    current: Value?, refreshing: Bool, failed: Bool) -> DashboardMetricState<Value> {
+        DashboardMetricState(value: refreshing || failed ? cache.value(in: scope) : current,
+                             isRefreshing: refreshing, failed: failed)
+    }
+    var concurrencySummary: DashboardMetricState<DashboardConcurrency> {
+        metricState(cache: concurrencyCache, scope: accountSummaryScope, current: currentConcurrencySummary,
+                    refreshing: isRefreshingAccountSummary || isLoadingInitialAccounts, failed: concurrencyFailed)
+    }
+    var estimateSummary: DashboardMetricState<Double> {
+        metricState(cache: estimateCache, scope: accountSummaryScope, current: estimatedTotal,
+                    refreshing: isRefreshingQuota || isLoadingInitialAccounts, failed: estimateFailed)
+    }
+    func actualCostSummary(today: Bool) -> DashboardMetricState<DashboardActualCost> {
+        metricState(cache: today ? todayActualCache : cycleActualCache, scope: actualSummaryScope(today: today),
+                    current: currentActualSummary(today: today),
+                    refreshing: !eligibleSubscriptionIDs.isEmpty && (isRefreshingSubscriptions || isLoadingInitialAccounts),
+                    failed: actualSummaryFailed(today: today))
     }
     func todayActualSample(for id: Int) -> TodayActualUsageSample? {
         guard eligibleSubscriptionIDs.contains(id), pinnedAccountErrors[id] == nil,
@@ -490,11 +545,16 @@ final class AppStore: ObservableObject {
     }
     private func refreshRuntime() {
         guard canPoll, !isRefreshing else { return }
+        // Pin removal can produce a valid new aggregate from existing samples
+        // before the next request. Preserve exactly that displayed scope too.
+        concurrencyCache.record(currentConcurrencySummary, in: accountSummaryScope, failed: concurrencyFailed)
         isRefreshing = true
+        isRefreshingAccountSummary = true
         let token = generation; let config = configuration; let ids = pinnedIDs
         runtimeTask = Task { [self] in
             defer {
                 if generation == token {
+                    isRefreshingAccountSummary = false
                     isRefreshing = false; runtimeTask = nil
                     runtimeCompletedAt = now()
                     nextRuntimeAt = runtimeCompletedAt?.addingTimeInterval(runtimeDelay)
@@ -518,6 +578,8 @@ final class AppStore: ObservableObject {
                 if result.snapshots.isEmpty && !result.accountErrors.isEmpty { errorMessage = "账号读取失败，显示上次结果。" }
                 else { lastUpdated = now(); errorMessage = nil }
                 statusUpdatedAt = now()
+                concurrencyCache.record(currentConcurrencySummary, in: accountSummaryScope, failed: concurrencyFailed)
+                isRefreshingAccountSummary = false
                 if !platforms.contains(platform) { platform = "全部" }
                 // Start eligible quota work without waiting for daily statistics.
                 runDueRefreshes()
@@ -553,6 +615,7 @@ final class AppStore: ObservableObject {
         // If account details were not loaded yet, retain the pending intent
         // until refreshRuntime can supply them. Cancellation clears it.
         manualQuotaRefreshPending = false
+        estimateCache.record(estimatedTotal, in: accountSummaryScope, failed: estimateFailed)
         isRefreshingQuota = true
         quotaTask = Task { [self] in
             var attempted = false
@@ -575,6 +638,7 @@ final class AppStore: ObservableObject {
                 }
                 quotaTask = nil
                 if generation == token {
+                    estimateCache.record(estimatedTotal, in: accountSummaryScope, failed: estimateFailed)
                     isRefreshingQuota = false
                 }
                 updateQuotaDeadline(); scheduleWake()
@@ -665,10 +729,18 @@ final class AppStore: ObservableObject {
         let requests = subscriptionRequests
         guard !requests.isEmpty else { return }
         let token = subscriptionGeneration; let config = configuration; let date = now()
+        todayActualCache.record(currentActualSummary(today: true), in: actualSummaryScope(today: true),
+                                failed: actualSummaryFailed(today: true))
+        cycleActualCache.record(currentActualSummary(today: false), in: actualSummaryScope(today: false),
+                                failed: actualSummaryFailed(today: false))
         isRefreshingSubscriptions = true
         subscriptionTask = Task { [self] in
             defer {
                 if token == subscriptionGeneration {
+                    todayActualCache.record(currentActualSummary(today: true), in: actualSummaryScope(today: true),
+                                            failed: actualSummaryFailed(today: true))
+                    cycleActualCache.record(currentActualSummary(today: false), in: actualSummaryScope(today: false),
+                                            failed: actualSummaryFailed(today: false))
                     subscriptionTask = nil; isRefreshingSubscriptions = false
                     subscriptionCompletedAt = now()
                     subscriptionRetryNotBefore = subscriptionFailures > 0 ? now().addingTimeInterval(subscriptionDelay) : nil
@@ -786,6 +858,7 @@ final class AppStore: ObservableObject {
         // Keep the quota task as a lock until its cancellation has completed.
         runtimeTask = nil; pollTask = nil
         isRefreshing = false; isRefreshingQuota = false
+        isRefreshingAccountSummary = false
         quotaLoadingTask?.cancel(); quotaLoadingTask = nil
         showsQuotaLoading = false; quotaLoadingStartedAt = nil
         nextRuntimeAt = nil; nextRefreshAt = nil
