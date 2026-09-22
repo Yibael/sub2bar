@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let popover = NSPopover()
     private var settingsWindow: NSWindow?
     private var observation: AnyCancellable?
+    private var tooltipUpdatePending = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMainMenu()
@@ -39,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.contentSize = NSSize(width: PanelSizing.width, height: PanelSizing.initialHeight)
         popover.contentViewController = NSHostingController(rootView: panelView())
         observation = store.objectWillChange.sink { [weak self] _ in
-            DispatchQueue.main.async { self?.updateTooltip() }
+            self?.scheduleTooltipUpdate()
         }
         store.start()
         if !store.isConfigured {
@@ -132,6 +133,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func wokeUp() { store.resumeAfterSleep() }
     @objc private func willSleep() { store.suspendForSleep() }
+    private func scheduleTooltipUpdate() {
+        guard !tooltipUpdatePending else { return }
+        tooltipUpdatePending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.tooltipUpdatePending = false
+            self.updateTooltip()
+        }
+    }
     private func updateTooltip() {
         let state = store.errorMessage != nil ? "连接异常" : "\(store.activeCount) 个可调度账号"
         statusItem.button?.toolTip = "Sub2Bar · \(state)"

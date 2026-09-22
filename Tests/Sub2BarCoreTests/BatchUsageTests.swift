@@ -18,6 +18,20 @@ private final class BatchUsageProtocol: URLProtocol {
 }
 
 final class BatchUsageTests: XCTestCase {
+    @MainActor
+    func testRequestsStartedFromMainActorDecodeOffTheMainThread() async throws {
+        struct Probe: Decodable {
+            let decodedOnMainThread: Bool
+            init(from decoder: Decoder) throws {
+                _ = try decoder.singleValueContainer()
+                decodedOnMainThread = Thread.isMainThread
+            }
+        }
+        BatchUsageProtocol.handler = { _ in (200, #"{"code":0,"data":{}}"#) }
+        let probe: Probe = try await client().get("accounts/1")
+        XCTAssertFalse(probe.decodedOnMainThread)
+    }
+
     override func tearDown() { BatchUsageProtocol.handler = nil; super.tearDown() }
 
     private func client() -> APIClient {
@@ -118,6 +132,22 @@ final class BatchUsageTests: XCTestCase {
         }
         let costs = try await client().loadTodayUsageBatch(ids: [1, 2, 3, 4, 5])
         XCTAssertEqual(costs, [4: 0])
+    }
+
+    func testFullTodayStatsAreIndependentAndDoNotRequireStandardCost() async throws {
+        BatchUsageProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/admin/accounts/today-stats/batch")
+            return (200, #"{"code":0,"data":{"stats":{"1":{"standard_cost":12,"cost":8,"user_cost":15,"requests":7,"tokens":1234567},"2":{"cost":0,"user_cost":0,"requests":0,"tokens":0},"3":{"standard_cost":2,"cost":"bad","requests":-1,"tokens":-1}}}}"#)
+        }
+        let stats = try await client().loadTodayStatsBatch(ids: [1, 2, 3, 4])
+        XCTAssertEqual(stats[1]?.standardCost, 12); XCTAssertEqual(stats[1]?.accountCost, 8)
+        XCTAssertEqual(stats[1]?.userCost, 15); XCTAssertEqual(stats[1]?.requests, 7)
+        XCTAssertEqual(stats[1]?.tokens, 1234567); XCTAssertEqual(stats[2]?.tokens, 0)
+        XCTAssertNil(stats[3]?.tokens); XCTAssertNil(stats[4]?.tokens)
+        XCTAssertNil(stats[2]?.standardCost); XCTAssertEqual(stats[2]?.accountCost, 0)
+        XCTAssertEqual(stats[2]?.requests, 0)
+        XCTAssertEqual(stats[3]?.standardCost, 2); XCTAssertNil(stats[3]?.accountCost)
+        XCTAssertNil(stats[3]?.requests); XCTAssertNil(stats[4])
     }
 
     func testTodayBatchWithNoIDsMakesNoRequest() async throws {

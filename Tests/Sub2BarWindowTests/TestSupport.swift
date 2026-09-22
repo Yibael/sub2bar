@@ -71,6 +71,8 @@ final class MockBackend: @unchecked Sendable {
     private var _usageError = 0
     private var _failedUsageIDs: Set<Int> = []
     private var _platform = "openai"
+    private var _accountOverrides: [Int: [String: Any]] = [:]
+    private var _failedAccountIDs: Set<Int> = []
     private var _delayActive = 0.0
     private var _delayPassive = 0.0
     private var _delayRuntime = 0.0
@@ -109,6 +111,8 @@ final class MockBackend: @unchecked Sendable {
     var usageError: Int { get { lock.withLock { _usageError } } set { lock.withLock { _usageError = newValue } } }
     var failedUsageIDs: Set<Int> { get { lock.withLock { _failedUsageIDs } } set { lock.withLock { _failedUsageIDs = newValue } } }
     var platform: String { get { lock.withLock { _platform } } set { lock.withLock { _platform = newValue } } }
+    var accountOverrides: [Int: [String: Any]] { get { lock.withLock { _accountOverrides } } set { lock.withLock { _accountOverrides = newValue } } }
+    var failedAccountIDs: Set<Int> { get { lock.withLock { _failedAccountIDs } } set { lock.withLock { _failedAccountIDs = newValue } } }
     var delayActive: Double { get { lock.withLock { _delayActive } } set { lock.withLock { _delayActive = newValue } } }
     var delayPassive: Double { get { lock.withLock { _delayPassive } } set { lock.withLock { _delayPassive = newValue } } }
     var delayRuntime: Double { get { lock.withLock { _delayRuntime } } set { lock.withLock { _delayRuntime = newValue } } }
@@ -153,7 +157,7 @@ final class MockBackend: @unchecked Sendable {
                 todayBatches.append(ids)
                 if _todayError > 0 { return (_todayError, "private-secret-error", _delayToday) }
                 let values = Dictionary(uniqueKeysWithValues: ids.filter { !_missingTodayIDs.contains($0) }.map {
-                    (String($0), ["standard_cost": _todayCost, "cost": 98.0, "user_cost": 76.0])
+                    (String($0), ["standard_cost": _todayCost, "cost": 98.0, "user_cost": 76.0, "requests": 286, "tokens": 1234567])
                 })
                 let data = try! JSONSerialization.data(withJSONObject: ["code": 0, "data": ["stats": values]])
                 return (200, String(decoding: data, as: UTF8.self), _delayToday)
@@ -181,6 +185,14 @@ final class MockBackend: @unchecked Sendable {
                         url.query?.contains("source=active") == true ? _delayActive : _delayPassive)
             }
             let id = Int(url.lastPathComponent) ?? 1
+            if _failedAccountIDs.contains(id) && !url.path.hasSuffix("/accounts") { return (503, "private-secret-error", _delayRuntime) }
+            if let override = _accountOverrides[id], !url.path.hasSuffix("/accounts") {
+                var fields: [String: Any] = ["id": id, "name": "Account \(id)", "platform": _platform,
+                    "type": "oauth", "status": _status, "schedulable": true, "concurrency": 5, "current_concurrency": _concurrency]
+                fields.merge(override) { _, new in new }
+                let data = try! JSONSerialization.data(withJSONObject: ["code": 0, "data": fields])
+                return (200, String(decoding: data, as: UTF8.self), _delayRuntime)
+            }
             let item = "{\"id\":\(id),\"name\":\"Account \(id)\",\"platform\":\"\(_platform)\",\"type\":\"oauth\",\"status\":\"\(_status)\",\"schedulable\":true,\"concurrency\":5,\"current_concurrency\":\(_concurrency),\"extra\":{\"codex_5h_used_percent\":10,\"codex_7d_used_percent\":\(_percentage),\"codex_usage_updated_at\":\"2026-09-15T10:00:00Z\",\"codex_7d_reset_at\":\"2026-09-20T10:00:00Z\"}}"
             if url.path.hasSuffix("/accounts") {
                 let items: [[String: Any]] = _directoryItems ?? _directoryIDs.map { ["id": $0, "name": "Account \($0)", "platform": _platform,

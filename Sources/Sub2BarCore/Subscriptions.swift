@@ -60,12 +60,12 @@ public struct SubscriptionCycle: Equatable, Sendable {
     }
 
     public func dateString(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.timeZone = TimeZone(identifier: timeZoneID)
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
+        // API date-only boundaries do not need a DateFormatter/ICU instance on
+        // every aggregate, card switch or request. Keep the same Gregorian zone.
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: timeZoneID)!
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year!, parts.month!, parts.day!)
     }
     /// The last included instant lies on the day before the next renewal.
     /// Subtract one second, not 24 hours: calendar days can cross DST changes.

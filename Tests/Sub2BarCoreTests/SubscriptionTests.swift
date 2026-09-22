@@ -4,6 +4,24 @@ import XCTest
 final class SubscriptionTests: XCTestCase {
     private func date(_ text: String) -> Date { parseAPIDate(text)! }
 
+    func testDateOnlyFormatterMatchesGregorianReferenceAcrossZonesAndDST() throws {
+        for zone in ["UTC", "Asia/Shanghai", "America/New_York", "Pacific/Kiritimati"] {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.timeZone = TimeZone(identifier: zone)
+            formatter.dateFormat = "yyyy-MM-dd"
+            for text in ["2024-02-29T23:59:59Z", "2026-03-08T06:59:59Z", "2026-03-08T07:00:00Z",
+                         "2026-11-01T05:59:59Z", "2026-11-01T06:00:00Z", "2026-12-31T23:59:59Z"] {
+                let instant = date(text)
+                let cycle = try XCTUnwrap(SubscriptionCycle(renewalDay: 15, at: instant, timeZoneID: zone))
+                XCTAssertEqual(cycle.dateString(instant), formatter.string(from: instant))
+                XCTAssertEqual(cycle.dateString(cycle.start), formatter.string(from: cycle.start))
+                XCTAssertEqual(cycle.dateString(cycle.lastIncludedDate), formatter.string(from: cycle.lastIncludedDate))
+            }
+        }
+    }
+
     func testCalendarMonthRatherThanThirtyDays() throws {
         let cycle = try XCTUnwrap(SubscriptionCycle(renewalDay: 12, at: date("2026-09-17T12:00:00Z"), timeZoneID: "UTC"))
         XCTAssertEqual(cycle.label, "2026-09-12 → 2026-10-11")

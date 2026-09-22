@@ -19,6 +19,12 @@ public struct Account: Decodable, Identifiable, Sendable {
     public let quotaWeeklyUsed: Double?
     public let quotaDailyLimit: Double?
     public let quotaDailyUsed: Double?
+    public let quotaLimit: Double?
+    public let quotaUsed: Double?
+    public let quotaDailyResetAt: String?
+    public let quotaWeeklyResetAt: String?
+    public let quotaDailyResetMode: String?
+    public let quotaWeeklyResetMode: String?
 
     public var platformLabel: String {
         switch platform {
@@ -39,6 +45,7 @@ public struct Account: Decodable, Identifiable, Sendable {
         if let end = overloadUntil.flatMap(parseAPIDate), end > now { return "过载中" }
         if let end = tempUnschedulableUntil.flatMap(parseAPIDate), end > now { return "暂不可调度" }
         if schedulable == false { return "已停调度" }
+        if localQuotas.contains(where: { $0.isExceeded(at: now) }) { return "限额已用尽" }
         return status == "active" ? "可调度" : "状态未知"
     }
 
@@ -52,7 +59,7 @@ public struct Account: Decodable, Identifiable, Sendable {
     }
 }
 
-/// Decode only the published, non-secret Codex snapshot fields from extra.
+/// Decode only allowlisted non-secret usage snapshots and local quota timing.
 /// Dictionary keys intentionally bypass convertFromSnakeCase (5h / 7d keys).
 public struct CodexQuotaCache: Decodable, Sendable {
     private struct Scalar: Decodable, Sendable {
@@ -68,10 +75,13 @@ public struct CodexQuotaCache: Decodable, Sendable {
     public init(from decoder: Decoder) throws {
         let all = try decoder.singleValueContainer().decode([String: Scalar].self)
         let allowed = ["codex_usage_updated_at", "codex_5h_used_percent", "codex_5h_reset_at",
-                       "codex_5h_reset_after_seconds", "codex_7d_used_percent", "codex_7d_reset_at", "codex_7d_reset_after_seconds"]
+                       "codex_5h_reset_after_seconds", "codex_7d_used_percent", "codex_7d_reset_at", "codex_7d_reset_after_seconds",
+                       "quota_daily_start", "quota_weekly_start", "quota_daily_reset_mode", "quota_weekly_reset_mode",
+                       "quota_daily_reset_at", "quota_weekly_reset_at"]
         values = all.filter { allowed.contains($0.key) }
     }
     public var sampledAt: Date? { values["codex_usage_updated_at"]?.string.flatMap(parseAPIDate) }
+    func quotaString(_ key: String) -> String? { values[key]?.string }
     public func usage(at now: Date) -> UsageInfo {
         UsageInfo(fiveHour: window("5h", now: now), sevenDay: window("7d", now: now),
                   updatedAt: values["codex_usage_updated_at"]?.string, source: "server_snapshot")
@@ -171,18 +181,20 @@ public struct AccountSnapshot: Identifiable, Sendable {
         self.statisticsUpdatedAt = statisticsUpdatedAt
     }
     public var weeklyPercentage: Double? {
-        if let value = usage?.sevenDay?.percentage { return value }
-        guard let limit = account.quotaWeeklyLimit, limit > 0,
-              let used = account.quotaWeeklyUsed, used >= 0 else { return nil }
-        return used / limit * 100
+        account.supportsUsageQuery ? usage?.sevenDay?.percentage : nil
     }
     public var estimatedWeeklyCost: Double? {
         // Match sub2api's OpenAI seven-day estimate; do not extrapolate other providers.
         // Cost and utilization must be from the same sampling result. Never
         // divide an old cost by a newly polled snapshot percentage.
-        account.platform == "openai" ? (statisticsUsage ?? usage)?.sevenDay?.estimatedTotalCost : nil
+        account.platform == "openai" && account.type == "oauth" ? (statisticsUsage ?? usage)?.sevenDay?.estimatedTotalCost : nil
     }
-    public var weeklyCost: Double? { (statisticsUsage ?? usage)?.sevenDay?.windowStats?.cost }
+    public var weeklyCost: Double? { account.supportsUsageQuery ? (statisticsUsage ?? usage)?.sevenDay?.windowStats?.cost : nil }
+    public func needsQuotaAttention(at date: Date) -> Bool {
+        account.localQuotas.contains { ($0.percentage ?? 0) >= 90 && ($0.resetDate.map { $0 > date } ?? true) } ||
+        (account.supportsUsageQuery && ((weeklyPercentage ?? 0) >= 90 ||
+            (usage?.fiveHour?.percentage ?? 0) >= 90 || usageError != nil))
+    }
 }
 
 public struct AccountPage: Decodable, Sendable {

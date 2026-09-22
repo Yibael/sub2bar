@@ -103,11 +103,12 @@ final class CoreTests: XCTestCase {
         XCTAssertFalse(account.isAvailable)
     }
 
-    func testLocalQuotaFallbackAndProviderEstimateRestriction() throws {
-        let account = try makeDecoder().decode(Account.self, from: Data(#"{"id":1,"name":"A","platform":"anthropic","quota_weekly_limit":200,"quota_weekly_used":50}"#.utf8))
+    func testLocalQuotaIsSeparateFromUpstreamWindowAndEstimate() throws {
+        let account = try makeDecoder().decode(Account.self, from: Data(#"{"id":1,"name":"A","platform":"anthropic","type":"apikey","quota_weekly_limit":200,"quota_weekly_used":50}"#.utf8))
         let usage = try decodeUsage(#"{"seven_day":{"utilization":25,"window_stats":{"cost":20}}}"#)
         XCTAssertNil(AccountSnapshot(account: account, usage: usage).estimatedWeeklyCost)
-        XCTAssertEqual(AccountSnapshot(account: account, usage: nil).weeklyPercentage, 25)
+        XCTAssertNil(AccountSnapshot(account: account, usage: nil).weeklyPercentage)
+        XCTAssertEqual(account.localQuotas.first?.percentage, 25)
     }
 
     func testDatesAndUpstreamErrors() throws {
@@ -136,7 +137,7 @@ final class CoreTests: XCTestCase {
         XCTAssertNil(account.extra?.usage(at: Date()).sevenDay)
     }
     func testNewPercentAndOlderCostsNeverMixForEstimate() throws {
-        let account = try makeDecoder().decode(Account.self, from: Data(#"{"id":1,"name":"A","platform":"openai"}"#.utf8))
+        let account = try makeDecoder().decode(Account.self, from: Data(#"{"id":1,"name":"A","platform":"openai","type":"oauth"}"#.utf8))
         let cached = UsageInfo(sevenDay: UsageWindow(utilization: 90))
         let stats = try decodeUsage(#"{"seven_day":{"utilization":25,"window_stats":{"cost":20}}}"#)
         let snapshot = AccountSnapshot(account: account, usage: cached, statisticsUsage: stats)
@@ -257,12 +258,25 @@ final class APIClientTests: XCTestCase {
     func testUsageAuthFailureInvalidatesWholeRefresh() async {
         StubProtocol.handler = { request in
             if request.url!.path.hasSuffix("/accounts/1") {
-                return (200, #"{"code":0,"data":{"id":1,"name":"A","platform":"openai"}}"#)
+                return (200, #"{"code":0,"data":{"id":1,"name":"A","platform":"openai","type":"oauth"}}"#)
             }
             return (403, "forbidden")
         }
         do { _ = try await client().loadPinnedSnapshot(ids: [1]); XCTFail("Expected auth error") }
         catch { XCTAssertEqual(error as? APIError, .http(403)) }
+    }
+
+    func testAPIKeySnapshotWithConfiguredQuotaNeverCallsUsageEndpoint() async throws {
+        StubProtocol.handler = { request in
+            XCTAssertEqual(request.url!.path, "/api/v1/admin/accounts/1")
+            return (200, #"{"code":0,"data":{"id":1,"name":"API","platform":"openai","type":"apikey","quota_limit":100,"quota_used":25}}"#)
+        }
+        let result = try await client().loadPinnedSnapshot(ids: [1])
+        let snapshot = try XCTUnwrap(result.snapshots.first)
+        XCTAssertEqual(snapshot.account.localQuotas.first?.percentage, 25)
+        XCTAssertNil(snapshot.usage); XCTAssertNil(snapshot.usageError)
+        do { _ = try await client().loadUsage(for: snapshot.account, passive: false); XCTFail("Unsupported route") }
+        catch { XCTAssertEqual(error as? APIError, .invalidResponse) }
     }
 
     func testRedirectResponseIsRejected() async {
@@ -316,7 +330,7 @@ final class APIClientTests: XCTestCase {
             XCTAssertEqual(request.httpMethod, "GET")
             for id in [7, 2] {
                 if path == "/api/v1/admin/accounts/\(id)" {
-                    return (200, "{\"code\":0,\"data\":{\"id\":\(id),\"name\":\"Account \(id)\",\"platform\":\"openai\",\"current_concurrency\":\(id)}}")
+                    return (200, "{\"code\":0,\"data\":{\"id\":\(id),\"name\":\"Account \(id)\",\"platform\":\"openai\",\"type\":\"oauth\",\"current_concurrency\":\(id)}}")
                 }
                 if path == "/api/v1/admin/accounts/\(id)/usage" { return (200, #"{"code":0,"data":{"seven_day":{"utilization":10}}}"#) }
             }

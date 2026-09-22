@@ -96,27 +96,29 @@ public final class APIClient: @unchecked Sendable {
     /// Database-only daily statistics, in the server's timezone. Never substitute
     /// account/user billing costs or call the upstream-aware /usage endpoint.
     public func loadTodayUsageBatch(ids: [Int]) async throws -> [Int: Double] {
+        try await loadTodayStatsBatch(ids: ids).compactMapValues(\.standardCost)
+    }
+
+    public func loadTodayStatsBatch(ids: [Int]) async throws -> [Int: AccountTodayStats] {
         struct Body: Encodable { let account_ids: [Int] }
-        struct Stats: Decodable { let standardCost: Double? }
-        struct Payload: Decodable { let stats: [String: Stats] }
+        struct Payload: Decodable { let stats: [String: AccountTodayStats] }
         var seen = Set<Int>()
         let ids = ids.filter { $0 > 0 && seen.insert($0).inserted }
-        var costs: [Int: Double] = [:]
+        var stats: [Int: AccountTodayStats] = [:]
         for start in stride(from: 0, to: ids.count, by: 100) {
             try Task.checkCancellation()
             let chunk = Array(ids[start..<min(start + 100, ids.count)])
             let data = try JSONEncoder().encode(Body(account_ids: chunk))
             let response: Payload = try await request("accounts/today-stats/batch", method: "POST", body: data)
             for id in chunk {
-                if let cost = response.stats[String(id)]?.standardCost, cost.isFinite, cost >= 0 {
-                    costs[id] = cost
-                }
+                stats[id] = response.stats[String(id)]
             }
         }
-        return costs
+        return stats
     }
 
     public func loadUsage(for account: Account, passive: Bool) async throws -> UsageInfo {
+        guard account.supportsUsageQuery else { throw APIError.invalidResponse }
         // There is no OpenAI cache-only /usage endpoint in the audited backend.
         guard !passive || account.supportsPassiveUsage else { throw APIError.invalidResponse }
         return try await get("accounts/\(account.id)/usage", query: [
@@ -190,10 +192,12 @@ public final class APIClient: @unchecked Sendable {
     }
 
     private func snapshot(_ account: Account) async throws -> AccountSnapshot {
+        guard account.supportsUsageQuery else { return AccountSnapshot(account: account, usage: nil) }
         do {
             let passive = account.platform == "anthropic" && ["oauth", "setup-token"].contains(account.type ?? "")
             let usage: UsageInfo = try await get("accounts/\(account.id)/usage", query: [
-                URLQueryItem(name: "source", value: passive ? "passive" : "active")
+                URLQueryItem(name: "source", value: passive ? "passive" : "active"),
+                URLQueryItem(name: "force", value: "false")
             ])
             return AccountSnapshot(account: account, usage: usage,
                 usageError: usage.hasError ? "上游额度暂不可用，请在后台检查账号状态。" : nil)

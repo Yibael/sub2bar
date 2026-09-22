@@ -247,15 +247,6 @@ struct PinnedAccountsView: View {
 private struct AccountDirectoryIdentity: View {
     let account: Account
 
-    private var typeLabel: String {
-        switch account.type {
-        case "oauth": return "OAuth"
-        case "apikey", "api_key", "api-key": return "API Key"
-        case "setup-token": return "Setup Token"
-        default: return account.type ?? "类型未知"
-        }
-    }
-
     var body: some View {
         HStack(spacing: 10) {
             ProviderIcon(platform: account.platform).frame(width: 28, height: 28)
@@ -263,7 +254,7 @@ private struct AccountDirectoryIdentity: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(account.name).font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.primary).lineLimit(1).truncationMode(.middle).help(account.name)
-                Text("\(account.platformLabel) · \(typeLabel) · #\(account.id)")
+                Text("\(account.platformLabel) · \(account.typeLabel) · #\(account.id)")
                     .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                 HStack(spacing: 4) {
                     Circle().fill(account.isAvailable ? Color.green : Color.secondary).frame(width: 4, height: 4)

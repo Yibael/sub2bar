@@ -2,6 +2,21 @@
 
 核查时间：2026-09-16。官方仓库 `Wei-Shaw/sub2api`，固定 commit `881f3202694c6bc932446931a30c27d9675178b9`。本核查针对该源码，不代表已验证用户部署的版本。
 
+## 普通 API 账号补充核查（2026-09-22）
+
+本节核对官方 commit `1c0a69c0ceddb2fd21581c17ab09f6c500b89ba1`（2026-09-21），并更新客户端行为；未验证用户部署版本。以下规则优先于旧版文中“全部 Pin 都查询额度”的描述。
+
+- `backend/internal/service/account_usage_service.go` 的 `getUsageForAccount`：普通 OpenAI / Anthropic API Key 即使配置了 sub2api 限额，仍不支持通用 `/accounts/:id/usage`。客户端仅将支持的账号送入额度批次、兼容单账号查询及额度冷却调度。能力按平台和类型判断：Anthropic OAuth / Setup Token；OpenAI / Antigravity / Grok OAuth；Gemini OAuth / API Key。不能通过查询失败推断没有配置限额。
+- `backend/internal/handler/dto/mappers.go`：API Key / Bedrock 的 `quota_daily_limit/used`、`quota_weekly_limit/used`、`quota_limit/used` 随账号详情返回；仅启用的正数限额输出。服务端会将已过期日／周窗口的展示用量归零。客户端分别判断每一项，不将本地周限额当作上游七天额度，也不将总限额称为上游余额。
+- 日／周重置优先遵循固定模式下服务端返回的 `quota_daily_reset_at` / `quota_weekly_reset_at`；滚动模式依据 `extra` 中的 `quota_daily_start` / `quota_weekly_start` 加 24 小时 / 7 天。只扩展读取这些非敏感时间字段的 allowlist，不保留 credentials。没有可靠时间不显示倒计时，总限额没有重置周期。到期显示等待更新，不在客户端虚构新窗口。
+- 今日统计复用 `accounts/today-stats/batch`，新增解码 `cost`、`user_cost`、`requests` 和 `tokens`，不增加请求、不请求 Token 明细。`tokens` 是输入、输出、缓存写入及缓存读取 Token 的合计；卡片紧凑显示，悬停和详情保留完整整数。`standard_cost` 是标准价；`cost = SUM(COALESCE(account_stats_cost, total_cost) * COALESCE(account_rate_multiplier, 1))` 是账号费用；`user_cost = SUM(actual_cost)` 是用户扣费。依据 `repository/usage_log_repo_stats.go` 的 `GetAccountWindowStatsBatch`。金额和计数独立校验，不互相回退，缺失或非法值不冒充零；用户扣费仍来自服务端自然日、含全部用户，不套用订阅的 Admin 排除或统计时区。
+- 普通 API 展示今日标准价用量、账号费用、请求数和 Token；用户扣费及各限额已用 / 上限在详情中，所有新增金额遵循隐私开关。没有月价或续费周期要求，不纳入现有 OAuth 订阅消费 / 成本汇总、今日实际消费汇总或周额度估算。
+- 账号详情失败保留上次成功的卡片、限额和采样时间，以置灰表示非实时，并发不继续冒充实时值；没有历史快照则显示可展开的置灰占位卡片。详情成功且未配置限额才显示“未配置 sub2api 限额”；失败不能产生这一结论。已配置但已用金额缺失时保留条目、显示未知。
+- 错误展示仅消费现有状态，不改变请求调度：Pin 数量旁的警告悬停按账号汇总详情、今日统计、上游额度、周期及今日实际消费错误，也保留账号状态和额度提醒；只纳入当前 Pin 和适用统计范围。移除全局错误横幅；单项统计失败不置灰整个账号，部分今日统计只标记缺失字段。置灰不禁用切换、展开或刷新；错误详情沿用客户端安全文案，不暴露响应正文。认证失败仍进入凭据恢复流程并暂停轮询。
+- 额度区域与 OAuth 复用行样式而非逐条位置：只显示实际配置的日／周／总条目，高度随内容变化。未配置或无可用限额时，保留两行进度条的最小高度；今日用量保持左列。纯本地统计型 Pin 不进入上游额度计时，顶部显示状态刷新倒计时。
+- 官方前端对应参考：`frontend/src/components/account/AccountUsageCell.vue` 的 `shouldFetchUsage`、API Key 今日统计、`quotaDailyBar` / `quotaWeeklyBar` / `quotaTotalBar`。部分国产平台、Ollama 等有专属套餐 / 余额接口，本次未新增这些适配器，不能宣称本地限额等同其上游额度。
+- 切换只修改独立的选择状态，不等待、取消或追加请求；卡片和分页控件单独订阅该状态。请求仍异步执行，JSON 解码有非主线程回归测试。账号状态／额度批次各一次性提交完整快照，保留原有统计范围、旧值策略及计时；已有请求延迟不阻止选择新页，未知字段显示 loading。
+
 ## 当前客户端刷新策略
 
 仅面板打开时调度三类请求，间隔从请求完成后计时，进行中的同类请求不重复调度：

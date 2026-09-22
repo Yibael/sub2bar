@@ -20,19 +20,27 @@ public struct PinnedAccountOverview {
             if state == "状态未知" { unknown += 1 }
             else if state == "可调度" { available += 1 }
             if (state != "可调度" && state != "状态未知") ||
-                (snapshot.weeklyPercentage ?? 0) >= 90 ||
-                (snapshot.usage?.fiveHour?.percentage ?? 0) >= 90 || snapshot.usageError != nil {
+                snapshot.needsQuotaAttention(at: date) {
                 attention += 1
             }
         }
     }
 
     public var statusText: String {
+        statusText(includingFailures: true)
+    }
+
+    /// Fetch errors have a dedicated tooltip; avoid repeating a failed-count label.
+    public var informationalStatusText: String {
+        statusText(includingFailures: false)
+    }
+
+    private func statusText(includingFailures: Bool) -> String {
         var parts: [String] = []
         if failed == 0 && pending == 0 && unknown == 0 && available < total {
             parts.append("可调度 \(available)/\(total)")
         }
-        if failed > 0 { parts.append("读取失败 \(failed)") }
+        if includingFailures && failed > 0 { parts.append("读取失败 \(failed)") }
         if pending > 0 { parts.append("待载入 \(pending)") }
         if unknown > 0 { parts.append("状态未知 \(unknown)") }
         return parts.joined(separator: " · ")

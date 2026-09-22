@@ -14,6 +14,9 @@ enum PanelSizing {
     static let initialHeight: CGFloat = 660
     static let placeholderHeight: CGFloat = 360
     static let accountCardHeight: CGFloat = 212
+    static let quotaRowHeight: CGFloat = 14
+    static let quotaRowSpacing: CGFloat = 11
+    static let emptyQuotaHeight = quotaRowHeight * 2 + quotaRowSpacing
     static func hasMeasurements(_ measurements: [PanelSection: CGFloat]) -> Bool {
         [.header, .footer, .dashboard, .accounts].allSatisfy {
             (measurements[$0] ?? 0).isFinite && (measurements[$0] ?? 0) > 0

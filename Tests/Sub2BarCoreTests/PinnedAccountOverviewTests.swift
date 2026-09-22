@@ -4,7 +4,7 @@ import XCTest
 final class PinnedAccountOverviewTests: XCTestCase {
     private func snapshot(_ id: Int, status: String = "active", percent: Double = 20,
                           fiveHour: Double = 20, usageError: String? = nil) throws -> AccountSnapshot {
-        let data = Data("{\"id\":\(id),\"name\":\"Account \(id)\",\"platform\":\"openai\",\"status\":\"\(status)\"}".utf8)
+        let data = Data("{\"id\":\(id),\"name\":\"Account \(id)\",\"platform\":\"openai\",\"type\":\"oauth\",\"status\":\"\(status)\"}".utf8)
         let account = try makeDecoder().decode(Account.self, from: data)
         return AccountSnapshot(account: account, usage: UsageInfo(fiveHour: UsageWindow(utilization: fiveHour),
                                                                 sevenDay: UsageWindow(utilization: percent)), usageError: usageError)
