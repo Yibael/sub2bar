@@ -66,7 +66,7 @@ extension APIClient {
         return stats.totalActualCost
     }
 
-    private func loadAdminUserIDs() async throws -> [Int] {
+    func loadAdminUserIDs() async throws -> [Int] {
         struct User: Decodable { let id: Int; let role: String }
         struct Page: Decodable { let items: [User]; let total: Int }
         var ids: [Int] = []; var seen = Set<Int>()

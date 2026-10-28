@@ -492,7 +492,7 @@ final class MonitorTests: XCTestCase {
         XCTAssertNil(f.store.nextRuntimeAt)
         XCTAssertNil(f.store.nextRefreshAt)
     }
-    func testNoPinsMeansNoRequestsAndPinOrderPersists() async throws {
+    func testNoPinsMeansNoAccountRequestsAndPinOrderPersists() async throws {
         let f = try StoreFixture(ids: []); defer { f.cleanup() }
         f.store.setPanelVisible(true); await f.store.prepareCredentials(); f.store.refresh()
         XCTAssertTrue(f.backend.requests.isEmpty)

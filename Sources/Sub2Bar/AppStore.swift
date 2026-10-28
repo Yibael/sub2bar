@@ -28,6 +28,7 @@ final class AppStore: ObservableObject {
     @Published private(set) var pinnedIDs: [Int] = []
     // Navigation invalidates only the pager/card, not all dashboard aggregates.
     let navigation = PinnedAccountNavigation()
+    let dashboard: GlobalDashboardStore
     private(set) var selectedPinnedID: Int? {
         get { navigation.selectedID }
         set { navigation.select(newValue) }
@@ -122,9 +123,12 @@ final class AppStore: ObservableObject {
 
     init(defaults: UserDefaults = .standard, credentials: CredentialSession? = nil,
          now: @escaping () -> Date = Date.init, automaticallySchedule: Bool = true,
-         clientFactory: @escaping ClientFactory = { APIClient(configuration: $0, key: $1) }) {
+         clientFactory: @escaping ClientFactory = { APIClient(configuration: $0, key: $1) },
+         dashboardClientFactory: ClientFactory? = nil) {
         self.defaults = defaults; self.credentials = credentials ?? CredentialSession()
         self.clientFactory = clientFactory; self.now = now; self.automaticallySchedule = automaticallySchedule
+        dashboard = GlobalDashboardStore(now: now, automaticallySchedule: automaticallySchedule,
+                                         clientFactory: dashboardClientFactory ?? clientFactory)
         areAmountsHidden = defaults.bool(forKey: amountsHiddenKey)
         configuration = defaults.data(forKey: defaultsKey).flatMap { try? JSONDecoder().decode(Configuration.self, from: $0) } ?? Configuration()
         pinSelection = defaults.data(forKey: pinsKey).flatMap { try? JSONDecoder().decode(PinnedAccountSelection.self, from: $0) } ?? PinnedAccountSelection()
@@ -132,6 +136,7 @@ final class AppStore: ObservableObject {
             .flatMap { try? JSONDecoder().decode(SubscriptionPreferences.self, from: $0) } ?? SubscriptionPreferences()
         restorePins()
         restoreSubscriptions()
+        dashboard.authenticationFailed = { [weak self] error in self?.handleAuthenticationFailure(error) }
     }
 
     func toggleAmountVisibility() {
@@ -178,10 +183,28 @@ final class AppStore: ObservableObject {
         guard canPoll else { return .disconnected }
         // Keep the last successful connection state during ordinary polling.
         // An upstream quota failure is not a failed connection to sub2api.
-        if lastUpdated != nil { return .connected }
+        if lastUpdated != nil || (pinCount == 0 && dashboard.hasLoaded) { return .connected }
+        if pinCount == 0 && (dashboard.refreshingCosts || dashboard.refreshingConcurrency) { return .connecting }
         return isRefreshing || isLoadingInitialAccounts ? .connecting : .disconnected
     }
-    var canPoll: Bool { isPanelVisible && !isSuspended && !requiresReopen && !isSaving && isConfigured && !needsCredentialAccess && !pinnedIDs.isEmpty }
+    var canPoll: Bool { isPanelVisible && !isSuspended && !requiresReopen && !isSaving && isConfigured && !needsCredentialAccess }
+
+    private func syncDashboard(dispatch: Bool = true) {
+        dashboard.configure(configuration, key: cachedKey(), ids: pinnedIDs, active: canPoll, dispatch: dispatch)
+    }
+
+    func setAdminExcluded(_ excluded: Bool) {
+        guard configuration.includeAdminUsage == excluded else { return }
+        configuration.includeAdminUsage = !excluded
+        if let data = try? JSONEncoder().encode(configuration) { defaults.set(data, forKey: defaultsKey) }
+        cancelSubscriptionPolling()
+        subscriptionUsage = [:]; subscriptionErrors = [:]
+        todayActualUsage = [:]; todayActualErrors = [:]
+        subscriptionCompletedAt = nil; subscriptionRetryNotBefore = nil; subscriptionFailures = 0
+        nextSubscriptionAt = now()
+        syncDashboard()
+        if canPoll { runDueRefreshes() }
+    }
     var platforms: [String] { ["全部"] + Set(snapshots.map(\.account.platformLabel)).sorted() }
     var filtered: [AccountSnapshot] {
         guard showsAccountFilters else { return snapshots }
@@ -391,6 +414,7 @@ final class AppStore: ObservableObject {
                 let runtimeChanged = configuration.accountRefreshInterval != saved.accountRefreshInterval
                 let statisticsChanged = configuration.statisticsRefreshInterval != saved.statisticsRefreshInterval
                 configuration = saved; defaults.set(data, forKey: defaultsKey)
+                syncDashboard(dispatch: false)
                 if quotaChanged { updateQuotaDeadline() }
                 if runtimeChanged, canPoll, !isRefreshing {
                     nextRuntimeAt = (runtimeCompletedAt ?? now()).addingTimeInterval(runtimeDelay)
@@ -413,6 +437,7 @@ final class AppStore: ObservableObject {
             // account directory. Save never dispatches a connection request.
             cancelPolling()
             configuration = saved; defaults.set(data, forKey: defaultsKey)
+            syncDashboard(dispatch: false)
             if statisticsChanged {
                 subscriptionUsage = [:]; subscriptionErrors = [:]; subscriptionFailures = 0
                 todayActualUsage = [:]; todayActualErrors = [:]
@@ -426,6 +451,7 @@ final class AppStore: ObservableObject {
         }
         resetAllRequests()
         configuration = saved; defaults.set(data, forKey: defaultsKey)
+        syncDashboard(dispatch: false)
         credentialAttemptedServer = base.absoluteString; credentialError = nil
         selectedPinnedID = nil
         restorePins()
@@ -454,7 +480,7 @@ final class AppStore: ObservableObject {
         let previousIndex = selectedPinnedIndex ?? 0
         pinSelection.setPinned(pinned, id: id, server: server)
         if let data = try? JSONEncoder().encode(pinSelection) { defaults.set(data, forKey: pinsKey) }
-        restorePins(); cancelPolling()
+        restorePins(); cancelPolling(stopDashboard: false)
         if removedSelected { selectedPinnedID = pinnedIDs.isEmpty ? nil : pinnedIDs[min(previousIndex, pinnedIDs.count - 1)] }
         snapshots.removeAll { !pinnedIDs.contains($0.id) }
         latestAccounts = latestAccounts.filter { pinnedIDs.contains($0.key) }
@@ -539,6 +565,7 @@ final class AppStore: ObservableObject {
     /// Explicit button action: bypass only the local timer/backoff, never send
     /// force=true to sub2api. Coalesce clicks with any existing quota request.
     func refreshManually() {
+        if canPoll { dashboard.refreshManually() }
         guard canPoll, quotaTask == nil else { return }
         manualQuotaRefreshPending = true
         if subscriptionTask == nil { nextSubscriptionAt = now() }
@@ -547,10 +574,11 @@ final class AppStore: ObservableObject {
     /// Independent lanes: account state/daily usage, quota/windows, and subscription consumption.
     func runDueRefreshes() {
         guard canPoll else { return }
+        syncDashboard()
         let date = now()
         updateQuotaDeadline()
         let runtimeDue = nextRuntimeAt.map { $0 <= date } ?? true
-        if !isRefreshing && runtimeDue { refreshRuntime() }
+        if !pinnedIDs.isEmpty && !isRefreshing && runtimeDue { refreshRuntime() }
         if quotaTask == nil, manualQuotaRefreshPending || (nextRefreshAt.map { $0 <= date } ?? false) {
             refreshQuota(ignoringSchedule: manualQuotaRefreshPending)
         }
@@ -906,7 +934,7 @@ final class AppStore: ObservableObject {
         pollTask?.cancel(); pollTask = nil
         guard automaticallySchedule, canPoll else { return }
         var dates: [Date] = []
-        if !isRefreshing, let nextRuntimeAt { dates.append(nextRuntimeAt) }
+        if !pinnedIDs.isEmpty, !isRefreshing, let nextRuntimeAt { dates.append(nextRuntimeAt) }
         if quotaTask == nil, let nextRefreshAt { dates.append(nextRefreshAt) }
         if subscriptionTask == nil, !subscriptionRequests.isEmpty, let nextSubscriptionAt { dates.append(nextSubscriptionAt) }
         guard let next = dates.min() else { return }
@@ -917,7 +945,8 @@ final class AppStore: ObservableObject {
             self.pollTask = nil; self.runDueRefreshes()
         }
     }
-    private func cancelPolling() {
+    private func cancelPolling(stopDashboard: Bool = true) {
+        if stopDashboard { dashboard.configure(configuration, key: cachedKey(), ids: pinnedIDs, active: false) }
         generation = UUID()
         cancelSubscriptionPolling()
         manualQuotaRefreshPending = false
@@ -935,6 +964,7 @@ final class AppStore: ObservableObject {
     }
     private func handleAuthenticationFailure(_ error: Error) {
         guard let error = error as? APIError, error == .http(401) || error == .http(403) else { return }
+        errorMessage = error.localizedDescription
         credentials.clear(); credentialRevision += 1
         credentialError = "服务器拒绝了 Admin Key，请在设置中更新。"
         resetAllRequests()

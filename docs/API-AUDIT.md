@@ -2,6 +2,26 @@
 
 核查时间：2026-09-16。官方仓库 `Wei-Shaw/sub2api`，固定 commit `881f3202694c6bc932446931a30c27d9675178b9`。本核查针对该源码，不代表已验证用户部署的版本。
 
+## 全局概览与 Admin 排除（2026-10-28）
+
+本节核对官方 commit `0a2a29b32e6724714c69822296ccd05a6b86bfdd`。本节优先于下文历史版本中“顶部只汇总 Pin / 完整订阅”“今日标准费用不受 Admin 影响”和“API 今日用户扣费仅来自今日批量统计”的描述；未连接用户真实服务器。
+
+- 全局今日和近 30 天使用 `GET /api/v1/admin/usage/stats`，不传 `account_id`、用户或平台过滤。`backend/internal/handler/admin/usage_handler.go` 的 `Stats` 允许省略账号过滤，解析显式 `start_date/end_date/timezone`，将包含式结束日期转为下一日 00:00；`nocache=true` 只绕过本地统计缓存。`repository/usage_log_repo_stats.go` 的 `GetStatsWithFilters` 对 `usage_logs` 求和：`total_cost = SUM(total_cost)`、`total_actual_cost = SUM(actual_cost)`。本路径不请求上游额度。
+- 近 30 天为所选时区今天及之前 29 个日历日，使用 Calendar 按天计算，跨月、闰年和夏令时不以固定秒数替代。今日标准费用始终按美元显示；实际消费使用既有可配置符号，均不进行汇率换算。
+- 排除 Admin 时分页读取 `GET users?role=admin`，沿用严格角色、完整分页校验；每轮全局与账号今日统计共用一次 Admin 名单。对每个日期 / 账号范围，先查询每位 Admin 的 `user_id` 小计，再查询总计，对标准费用和实际扣费分别相减。小计缺失、非法或扣除后负数只使对应金额不可用，不伪造零、不回退含 Admin 结果。Admin 列表读取失败使本轮费用全部失败；401/403 停止全部通道。
+- 全局总额不是 Pin 账号求和，包含所有账号类型，也包含无订阅配置账号；未 Pin 账号仍显示并刷新顶部。下方 Pin 账号的今日标准费用和实际消费在同一统计通道按 `account_id` 单独查询，API Key / Bedrock 无需本地订阅。今日账号费用、请求数、Token 仍来自原批量今日接口，维持服务端日期和全用户口径；账号费用并非用户实际扣费。
+- 全局总并发使用 `GET /api/v1/admin/ops/concurrency`，不带平台 / 分组过滤。`handler/admin/ops_realtime_handler.go` 的 `GetConcurrencyStats` 检查监控开关；`service/ops_concurrency.go` 的 `GetConcurrencyStats` 从本地账号仓储和 Redis 并发服务构造 `account`、`platform`、`group`。客户端只汇总 `account` 字典的 `current_in_use/max_capacity`，避免同账号跨分组重复计数；不请求上游。不支持、禁用、缺失字段或负值时显示不可用，不回退 Pin 汇总。服务端 Redis 负载读取是 best-effort，后端以成功响应返回零时，客户端无法区分缓存故障和真实零并发。
+- 并发沿用账号状态间隔，费用沿用消费统计间隔，从请求完成后计时；使用独立任务和代次隔离，不阻塞账号切换或上游额度查询。自动失败退避上限分别 120 秒 / 600 秒；关闭面板和休眠取消任务，重开不绕过未到期退避。间隔及符号修改保留请求和缓存，设置保存本身不发送请求。
+- 全局缓存按连接 / 密钥代次、时区、日期和 Admin 开关隔离，不依赖 Pin 顺序、当前账号或订阅配置。同范围刷新失败保留各卡片上次完整值；跨日、连接或口径变化不复用旧值。账号今日费用读取失败显示未知。全局今日两种金额与 30 天消费可以独立成功或失败，不拼接部分账号新旧数值冒充全局。
+- 底部“排除 Admin”开关写入既有 `includeAdminUsage` 偏好（反向布尔），并同步设置页。切换立即使不匹配消费样本失效并在面板可见时刷新；不清除并发样本、不重新查询账号目录、不改变额度冷却。本地订阅周期消费仍保留在 OAuth 账号卡片，沿用独立统计任务及 Admin 设置。
+
+源码：
+
+- `https://github.com/Wei-Shaw/sub2api/blob/0a2a29b32e6724714c69822296ccd05a6b86bfdd/backend/internal/handler/admin/usage_handler.go`
+- `https://github.com/Wei-Shaw/sub2api/blob/0a2a29b32e6724714c69822296ccd05a6b86bfdd/backend/internal/repository/usage_log_repo_stats.go`
+- `https://github.com/Wei-Shaw/sub2api/blob/0a2a29b32e6724714c69822296ccd05a6b86bfdd/backend/internal/handler/admin/ops_realtime_handler.go`
+- `https://github.com/Wei-Shaw/sub2api/blob/0a2a29b32e6724714c69822296ccd05a6b86bfdd/backend/internal/service/ops_concurrency.go`
+
 ## 普通 API 账号补充核查（2026-09-22）
 
 本节核对官方 commit `1c0a69c0ceddb2fd21581c17ab09f6c500b89ba1`（2026-09-21），并更新客户端行为；未验证用户部署版本。以下规则优先于旧版文中“全部 Pin 都查询额度”的描述。

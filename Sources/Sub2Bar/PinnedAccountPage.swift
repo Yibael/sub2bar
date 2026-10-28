@@ -15,6 +15,11 @@ final class PinnedAccountNavigation: ObservableObject {
 struct PinnedAccountPage: View {
     @ObservedObject var store: AppStore
     @ObservedObject var navigation: PinnedAccountNavigation
+    @ObservedObject private var dashboard: GlobalDashboardStore
+
+    init(store: AppStore, navigation: PinnedAccountNavigation) {
+        self.store = store; self.navigation = navigation; dashboard = store.dashboard
+    }
 
     var body: some View {
         let id = navigation.selectedID
@@ -22,9 +27,12 @@ struct PinnedAccountPage: View {
             AccountCard(snapshot: snapshot,
                         stale: store.accountReadError(for: snapshot.id) != nil,
                         isPanelVisible: store.isPanelVisible,
-                        todayCost: store.todayStats[snapshot.id]?.standardCost,
+                        todayCost: dashboard.costs(for: snapshot.id)?.totalCost.map { NSDecimalNumber(decimal: $0).doubleValue },
+                        todayActualCost: dashboard.costs(for: snapshot.id)?.totalActualCost,
+                        todayActualError: dashboard.costFailure(for: snapshot.id, standard: false),
+                        isRefreshingActualCost: dashboard.refreshingCosts,
                         todayStats: store.todayStats[snapshot.id],
-                        todayUsageError: store.todayUsageErrors[snapshot.id],
+                        todayUsageError: dashboard.costFailure(for: snapshot.id, standard: true) ?? store.todayUsageErrors[snapshot.id],
                         accountReadError: store.accountReadError(for: snapshot.id),
                         accountUpdatedAt: store.accountUpdatedAt[snapshot.id],
                         subscription: store.subscriptions[snapshot.id],
@@ -33,7 +41,7 @@ struct PinnedAccountPage: View {
                         subscriptionError: store.subscriptionErrors[snapshot.id],
                         actualCostCurrency: store.configuration.actualCostCurrency,
                         subscriptionCostCurrency: store.configuration.subscriptionCostCurrency,
-                        isRefreshingTodayUsage: store.isRefreshing,
+                        isRefreshingTodayUsage: store.isRefreshing || dashboard.refreshingCosts,
                         isRefreshingQuota: store.isRefreshingQuota,
                         isRefreshingSubscription: store.isRefreshingSubscriptions,
                         onSwitchAccount: store.selectAdjacentPinned)

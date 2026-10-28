@@ -119,7 +119,9 @@ final class MockBackend: @unchecked Sendable {
     var requests: [String] { lock.withLock { paths } }
     var activeCount: Int { requests.filter { $0.contains("source=active") }.count }
     var passiveCount: Int { requests.filter { $0.contains("source=passive") }.count }
-    var detailCount: Int { requests.filter { !$0.contains("usage") && !$0.contains("today-stats") && !$0.contains("?") }.count }
+    var detailCount: Int { requests.filter { $0.hasPrefix("/api/v1/admin/accounts/") && !$0.contains("usage") && !$0.contains("today-stats") && !$0.contains("?") }.count }
+    var globalStatsCount: Int { requests.filter { $0.contains("/usage/stats?") && !$0.contains("account_id=") }.count }
+    var concurrencyCount: Int { requests.filter { $0.hasSuffix("/ops/concurrency") }.count }
 
     func response(_ request: URLRequest) -> (Int, String, Double) {
         lock.withLock {
@@ -131,6 +133,9 @@ final class MockBackend: @unchecked Sendable {
             XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "fake-secret")
             XCTAssertFalse(url.absoluteString.contains("force=true"))
             if _error > 0 { return (_error, "private-secret-error", 0) }
+            if url.path.hasSuffix("/ops/concurrency") {
+                return (200, "{\"code\":0,\"data\":{\"enabled\":true,\"account\":{\"1\":{\"current_in_use\":\(_concurrency),\"max_capacity\":50},\"77\":{\"current_in_use\":2,\"max_capacity\":25}}}}", _delayRuntime)
+            }
             if url.path.hasSuffix("/users") {
                 if _usersError > 0 { return (_usersError, "private-secret-error", 0) }
                 return (200, #"{"code":0,"data":{"items":[{"id":9,"role":"admin"}],"total":1}}"#, 0)
@@ -205,14 +210,15 @@ final class MockBackend: @unchecked Sendable {
     }
 }
 
-final class MonitorURLProtocol: URLProtocol, @unchecked Sendable {
+class MonitorURLProtocol: URLProtocol, @unchecked Sendable {
     static var backend = MockBackend()
+    class var responseBackend: MockBackend { backend }
     private let lock = NSLock()
     private var stopped = false
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
-        let (status, body, delay) = Self.backend.response(request)
+        let (status, body, delay) = Self.responseBackend.response(request)
         let deliver: @Sendable () -> Void = { [self] in
             lock.withLock {
                 guard !stopped else { return }
@@ -227,12 +233,20 @@ final class MonitorURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() { lock.withLock { stopped = true } }
 }
 
+final class GlobalMonitorURLProtocol: MonitorURLProtocol, @unchecked Sendable {
+    static var globalBackend = MockBackend()
+    override class var responseBackend: MockBackend { globalBackend }
+}
+
 @MainActor
 final class StoreFixture {
     let name = "com.sub2bar.test.\(UUID().uuidString)"
     let defaults: UserDefaults
     let vault: MemoryVault
     let backend = MockBackend()
+    // Separate injected transports keep legacy account/subscription scheduling
+    // assertions scoped to their lane. Global tests inspect both backends.
+    let globalBackend = MockBackend()
     var date = parseAPIDate("2026-09-15T10:00:00Z")!
     var store: AppStore!
     init(ids: [Int] = [1], interval: Double = 5, vault: MemoryVault = MemoryVault(), automatic: Bool = false,
@@ -244,10 +258,15 @@ final class StoreFixture {
         for id in ids { pins.setPinned(true, id: id, server: "https://example.invalid") }
         defaults.set(try JSONEncoder().encode(pins), forKey: "sub2bar.pins.v1")
         MonitorURLProtocol.backend = backend
+        GlobalMonitorURLProtocol.globalBackend = globalBackend
         store = AppStore(defaults: defaults, credentials: CredentialSession(storage: vault), now: { [weak self] in self?.date ?? Date() }, automaticallySchedule: automatic,
                          clientFactory: { config, key in
             let sessionConfig = URLSessionConfiguration.ephemeral
             sessionConfig.protocolClasses = [MonitorURLProtocol.self]
+            return APIClient(configuration: config, key: key, session: URLSession(configuration: sessionConfig))
+        }, dashboardClientFactory: { config, key in
+            let sessionConfig = URLSessionConfiguration.ephemeral
+            sessionConfig.protocolClasses = [GlobalMonitorURLProtocol.self]
             return APIClient(configuration: config, key: key, session: URLSession(configuration: sessionConfig))
         })
     }

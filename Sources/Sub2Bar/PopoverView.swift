@@ -10,6 +10,7 @@ enum Theme {
 
 struct PopoverView: View {
     @ObservedObject var store: AppStore
+    @ObservedObject private var globalDashboard: GlobalDashboardStore
     let openSettings: () -> Void
     let version: String
     let onHeightChange: (CGFloat) -> Void
@@ -19,12 +20,13 @@ struct PopoverView: View {
          version: String = AppVersion.display(in: Bundle.main.infoDictionary),
          onHeightChange: @escaping (CGFloat) -> Void = { _ in }) {
         self.store = store
+        self.globalDashboard = store.dashboard
         self.openSettings = openSettings
         self.version = version
         self.onHeightChange = onHeightChange
     }
 
-    private var hasDashboard: Bool { store.isConfigured && !store.needsCredentialAccess && store.pinCount > 0 }
+    private var hasDashboard: Bool { store.isConfigured && !store.needsCredentialAccess }
     private var panelHeight: CGFloat { PanelSizing.height(measurements: measurements, hasDashboard: hasDashboard) }
     private var canReportHeight: Bool { !hasDashboard || PanelSizing.hasMeasurements(measurements) }
 
@@ -33,7 +35,6 @@ struct PopoverView: View {
             header.measurePanelSection(.header)
             if !store.isConfigured { welcome }
             else if store.needsCredentialAccess { credentialRequired }
-            else if store.pinCount == 0 { noPins }
             else { dashboard }
             footer.measurePanelSection(.footer)
         }
@@ -64,7 +65,7 @@ struct PopoverView: View {
             Spacer()
             refreshStatus
             QuotaRefreshButton(isLoading: store.showsQuotaLoading || store.isLoadingInitialAccounts,
-                               isEnabled: !store.needsCredentialAccess && store.isPanelVisible && store.isConfigured && store.pinCount > 0,
+                               isEnabled: !store.needsCredentialAccess && store.isPanelVisible && store.isConfigured,
                                action: store.refreshManually)
         }
         .padding(.horizontal, 20).padding(.vertical, 17)
@@ -113,7 +114,14 @@ struct PopoverView: View {
     private var dashboard: some View {
         VStack(spacing: 12) {
             dashboardHeader.measurePanelSection(.dashboard)
-            selectedAccount.fixedSize(horizontal: false, vertical: true).measurePanelSection(.accounts)
+            Group {
+                if store.pinCount == 0 {
+                    VStack(spacing: 10) {
+                        Text("Pin 账号后可在此查看账号详情").font(.system(size: 12)).foregroundStyle(.secondary)
+                        Button("选择账号", action: openSettings).buttonStyle(NeutralButtonStyle(.primary))
+                    }.frame(maxWidth: .infinity).padding(.vertical, 20)
+                } else { selectedAccount }
+            }.fixedSize(horizontal: false, vertical: true).measurePanelSection(.accounts)
         }.padding(.horizontal, 18).padding(.bottom, 12).fixedSize(horizontal: false, vertical: true)
     }
 
@@ -138,18 +146,23 @@ struct PopoverView: View {
     private var footer: some View {
         VStack(spacing: 0) {
             Divider()
-            HStack(spacing: 12) {
-                HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     HStack(spacing: 5) {
                         Image(systemName: store.connectionState.symbol)
                             .font(.system(size: 9))
-                        Text(store.connectionState.rawValue).font(.system(size: 10))
+                        Text(store.connectionState.rawValue).font(.system(size: 10)).fixedSize()
                     }
                     VersionBadge(version: version)
                 }
                 .foregroundStyle(.secondary)
                 .accessibilityElement(children: .combine)
                 Spacer()
+                Toggle("排除 Admin", isOn: Binding(get: { !store.configuration.includeAdminUsage },
+                    set: { store.setAdminExcluded($0) }))
+                    .toggleStyle(.switch).controlSize(.mini).font(.system(size: 10))
+                    .fixedSize().disabled(!store.isConfigured || store.isSaving)
+                    .help("同时排除实际消费和标准费用中的 Admin 用量，与设置同步。")
                 Button { store.openDashboard() } label: { Image(systemName: "arrow.up.right.square") }
                     .disabled(!store.isConfigured).help("打开 sub2api 后台").accessibilityLabel("打开 sub2api 后台")
                 AmountVisibilityButton(isHidden: store.areAmountsHidden, action: store.toggleAmountVisibility)
@@ -162,19 +175,6 @@ struct PopoverView: View {
         }
     }
 
-    private var noPins: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: "pin.slash").font(.system(size: 30, weight: .light)).foregroundStyle(.secondary)
-            Text("未选择账号").font(.system(size: 20, weight: .semibold))
-            Text("在设置中 Pin 账号。")
-                .font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center).lineSpacing(4)
-            Button("选择账号", action: openSettings).buttonStyle(NeutralButtonStyle(.primary))
-            Spacer()
-            Text("0 个账号")
-                .font(.system(size: 11)).foregroundStyle(.secondary).padding(.bottom, 28)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
 }
 
 struct DashboardSummaryCard<Content: View>: View {
@@ -399,6 +399,9 @@ struct AccountCard: View {
     let stale: Bool
     let isPanelVisible: Bool
     var todayCost: Double? = nil
+    var todayActualCost: Decimal? = nil
+    var todayActualError: String? = nil
+    var isRefreshingActualCost = false
     var todayStats: AccountTodayStats? = nil
     var todayUsageError: String? = nil
     var accountReadError: String? = nil
@@ -468,7 +471,7 @@ struct AccountCard: View {
                 usageMetric("今日用量", todayCost, alignment: .leading,
                             isLoading: todayCost == nil && todayUsageError == nil && isRefreshingTodayUsage,
                             failureHelp: dailyFailure(.standardCost))
-                    .help(dailyFailure(.standardCost) ?? "按标准价格折算，不含倍率；从服务端时区今日 00:00 起，仅统计本实例记录的用量。")
+                    .help(dailyFailure(.standardCost) ?? "按标准价格折算，不含倍率；从所选统计时区今日 00:00 起，沿用 Admin 排除开关。")
                 Divider().frame(height: 28)
                 if account.isAPIKeyAccount {
                     usageMetric("今日账号费用", todayStats?.accountCost, alignment: .leading,
@@ -496,10 +499,11 @@ struct AccountCard: View {
                                isLoading: todayStats == nil && todayUsageError == nil && isRefreshingTodayUsage,
                                failureHelp: dailyFailure(.tokens))
                         .help(dailyFailure(.tokens) ?? "\(todayStats?.tokens.map { $0.formatted() } ?? "—") Token · 服务端时区今日零点起，含输入、输出、缓存写入和缓存读取。")
-                    // Match the first row's three equal columns without drawing
-                    // separators or placeholder metrics for the two empty cells.
-                    Divider().frame(height: 28).hidden()
-                    Color.clear.frame(maxWidth: .infinity).frame(height: 28).accessibilityHidden(true)
+                    Divider().frame(height: 28)
+                    textMetric("今日实际消费", subscriptionMoney(todayActualCost, unit: actualCostCurrency),
+                               isSensitive: true, isLoading: todayActualCost == nil && isRefreshingActualCost,
+                               failureHelp: todayActualError)
+                        .help(todayActualError ?? "所选统计时区的今日实际用户扣费（含倍率），沿用 Admin 排除开关。")
                     Divider().frame(height: 28).hidden()
                     Color.clear.frame(maxWidth: .infinity).frame(height: 28).accessibilityHidden(true)
                 }
@@ -520,7 +524,7 @@ struct AccountCard: View {
                         }
                     }
                 } else {
-                    Text("订阅未配置完整 · 不纳入消费与成本汇总")
+                    Text("配置订阅后可查看周期消费与成本")
                         .font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
             }
@@ -627,7 +631,7 @@ struct AccountCard: View {
             detail("今日用量（标准价）", money(todayCost), isSensitive: true)
             if account.isAPIKeyAccount {
                 detail("今日账号费用", money(todayStats?.accountCost), isSensitive: true)
-                detail("今日用户扣费", subscriptionMoney(todayStats?.userCost.map { Decimal($0) }, unit: actualCostCurrency), isSensitive: true)
+                detail("今日实际消费", subscriptionMoney(todayActualCost, unit: actualCostCurrency), isSensitive: true)
                 detail("今日请求", todayStats?.requests.map { $0.formatted() } ?? "—")
                 detail("今日 Token", todayStats?.tokens.map { $0.formatted() } ?? "—")
                 detail("限额来源", "sub2api 管理员配置 · 非上游余额")

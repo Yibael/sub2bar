@@ -104,11 +104,12 @@ public struct Configuration: Codable, Equatable, Sendable {
 }
 
 public enum APIError: Error, LocalizedError, Equatable {
-    case invalidURL, insecureHTTP, missingKey, invalidResponse, tooManyPages
+    case invalidURL, insecureHTTP, missingKey, invalidResponse, tooManyPages, monitoringUnavailable
     case http(Int), server(Int), network
 
     public var errorDescription: String? {
         switch self {
+        case .monitoringUnavailable: return "服务器未启用实时监控，无法读取全局并发。"
         case .invalidURL: return "请输入完整的服务器地址，例如 https://sub2api.example.com；不要包含账号密码、查询参数或页面锚点。"
         case .insecureHTTP: return "HTTP 会明文传输 Admin Key。仅在可信网络下明确允许后使用。"
         case .missingKey: return "请先填写 Admin API Key。"

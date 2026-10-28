@@ -157,7 +157,7 @@ struct SettingsView: View {
                     }
                 }.accessibilityLabel("账号状态刷新间隔")
             } header: { Text("账号状态") }
-            footer: { Text("更新并发、账号状态及今日用量（标准价）。") }
+            footer: { Text("更新全局并发、账号状态、今日账号费用、请求数及 Token。") }
 
             Section {
                 Picker("刷新间隔", selection: $draft.refreshInterval) {
@@ -176,7 +176,7 @@ struct SettingsView: View {
                 }.accessibilityLabel("实际消费刷新间隔")
             } header: { Text("实际消费") }
             footer: {
-                Text("更新今日及当前订阅周期的实际消费。")
+                Text("更新全局今日标准费用、今日及近 30 天实际消费，以及账号今日费用和订阅周期消费。")
             }
         }.formStyle(.grouped).disabled(busy)
     }
@@ -193,11 +193,11 @@ struct SettingsView: View {
                 Text("仅更改显示符号，不换算金额。")
             }
             Section {
-                Toggle("包含 Admin 消费", isOn: $draft.includeAdminUsage).toggleStyle(.switch)
-                    .help("影响今日与周期实际消费，不影响标准价用量、额度或订阅成本。")
+                Toggle("包含 Admin 用量", isOn: $draft.includeAdminUsage).toggleStyle(.switch)
+                    .help("同时影响实际消费和标准费用，与面板底部的排除 Admin 开关同步。")
             } header: { Text("统计范围") }
             footer: {
-                Text("按实际扣费金额统计（含倍率），仅汇总已 Pin 且订阅配置完整的 OAuth 账号。")
+                Text("顶部统计整个 sub2api 实例，不受 Pin 或订阅配置影响。实际消费含倍率，标准费用不含倍率。")
             }
             Section {
                 Picker("时区", selection: $draft.subscriptionTimeZoneID) {
